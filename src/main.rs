@@ -8,6 +8,7 @@ mod hypr;
 mod paths;
 mod pin;
 mod plugin;
+mod select;
 mod selection;
 mod shell;
 mod shelljson;
@@ -50,8 +51,11 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Enable/disable components
-    Select,
+    /// Enable/disable components (edits the generated shell.json)
+    Select {
+        #[command(subcommand)]
+        cmd: SelectCmd,
+    },
     /// Update the upstream pin
     Update,
     /// Delegate to upstream theme scripts
@@ -66,6 +70,28 @@ struct BootstrapArgs {
     /// Regenerate generated artifacts against the existing pin (no re-clone)
     #[arg(long)]
     redo: bool,
+}
+
+#[derive(Subcommand)]
+enum SelectCmd {
+    /// Enable a component (bar-widgets take --section, default right)
+    Enable {
+        /// Plugin id, e.g. omarchy.clock
+        id: String,
+        /// Bar layout section for bar-widgets
+        #[arg(long, value_parser = ["left", "center", "right"])]
+        section: Option<String>,
+    },
+    /// Disable a component
+    Disable { id: String },
+}
+
+fn parse_section(s: Option<&str>) -> selection::Section {
+    match s {
+        Some("left") => selection::Section::Left,
+        Some("center") => selection::Section::Center,
+        _ => selection::Section::Right,
+    }
 }
 
 fn not_implemented(cmd: &str) -> ! {
@@ -125,7 +151,34 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Select => not_implemented("select"),
+        Command::Select { cmd } => {
+            let paths = paths::Paths::from_env();
+            let action = match cmd {
+                SelectCmd::Enable { id, section } => select::Action::Enable {
+                    id,
+                    section: parse_section(section.as_deref()),
+                },
+                SelectCmd::Disable { id } => select::Action::Disable { id },
+            };
+            match select::apply(&paths, &action) {
+                Ok(outcome) => {
+                    println!("opb select: {} ({})", outcome.note(), if outcome.changed() { "changed" } else { "unchanged" });
+                    if outcome.changed() {
+                        match shell::reload_if_running(&paths) {
+                            Ok(None) => println!("opb select: shell not running — change applies on next `opb up`"),
+                            Ok(Some(warning)) if warning.is_empty() => println!("opb select: shell reloaded"),
+                            Ok(Some(warning)) => println!("opb select: {warning} — restart with `opb down && opb up` to be sure"),
+                            Err(e) => eprintln!("opb select: reload check failed: {e:#}"),
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("opb select: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
         Command::Update => not_implemented("update"),
         Command::Theme => not_implemented("theme"),
     }

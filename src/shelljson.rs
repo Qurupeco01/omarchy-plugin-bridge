@@ -41,7 +41,7 @@ pub fn render(value: &serde_json::Value) -> String {
     s
 }
 
-/// Minimal manifest projection — read-only, ids only. No validation logic
+/// Read-only manifest projection — ids and kinds only. No validation logic
 /// (anti-duplication §5.2): upstream `omarchy plugin validate` owns that.
 #[derive(Debug, Deserialize)]
 struct ManifestId {
@@ -50,17 +50,22 @@ struct ManifestId {
     kinds: Vec<String>,
 }
 
-/// Scan `<pin>/shell/plugins` read-only for first-party manifests, mirroring
-/// PluginRegistry's `find -mindepth 2 -maxdepth 3 -type f \( -name manifest.json
-/// -o -name '*.manifest.json' \)`. Returns the sorted ids of every first-party
-/// plugin except the bar itself (kind `bar`) — exactly the ids an all-off
-/// config must place in `disabledPlugins[]`. Malformed manifests are skipped,
-/// matching upstream's warn-and-continue scan.
-pub fn first_party_non_bar_ids(plugins_dir: &Path) -> Result<Vec<String>> {
+/// One scanned manifest: id + declared kinds.
+#[derive(Debug, Clone)]
+pub struct ManifestInfo {
+    pub id: String,
+    pub kinds: Vec<String>,
+}
+
+/// Scan a plugins root read-only, mirroring PluginRegistry's
+/// `find -mindepth 2 -maxdepth 3 -type f \( -name manifest.json
+/// -o -name '*.manifest.json' \)`. Malformed manifests are skipped,
+/// matching upstream's warn-and-continue scan. Sorted by id, deduped.
+pub fn scan_manifests(plugins_dir: &Path) -> Result<Vec<ManifestInfo>> {
     if !plugins_dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut ids = Vec::new();
+    let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(plugins_dir)
         .min_depth(2)
         .max_depth(3)
@@ -80,14 +85,24 @@ pub fn first_party_non_bar_ids(plugins_dir: &Path) -> Result<Vec<String>> {
             Ok(m) => m,
             Err(_) => continue, // malformed manifest: upstream skips it too
         };
-        if manifest.kinds.iter().any(|k| k == BAR_KIND) {
-            continue;
-        }
-        ids.push(manifest.id);
+        out.push(ManifestInfo {
+            id: manifest.id,
+            kinds: manifest.kinds,
+        });
     }
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
+    Ok(out)
+}
+
+/// Sorted ids of every first-party plugin except the bar itself (kind `bar`)
+/// — exactly the ids an all-off config must place in `disabledPlugins[]`.
+pub fn first_party_non_bar_ids(plugins_dir: &Path) -> Result<Vec<String>> {
+    Ok(scan_manifests(plugins_dir)?
+        .into_iter()
+        .filter(|m| !m.kinds.iter().any(|k| k == BAR_KIND))
+        .map(|m| m.id)
+        .collect())
 }
 
 #[cfg(test)]

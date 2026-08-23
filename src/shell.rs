@@ -75,6 +75,32 @@ fn ping_ok(shell_dir: &Path) -> bool {
     )
 }
 
+/// Reload the running shell's config via IPC. Returns `Ok(false)` when the
+/// shell is not alive; `Ok(true)` when a reload was delivered. IPC exit codes
+/// are unreliable (session findings), so a non-ok reload is reported as a
+/// warning string rather than an error.
+pub fn reload_if_running(paths: &Paths) -> Result<Option<String>> {
+    let shell_dir = shell_dir(paths)?;
+    if !ping_ok(&shell_dir) {
+        return Ok(None);
+    }
+    let out = Command::new("quickshell")
+        .args(["ipc", "-p"])
+        .arg(&shell_dir)
+        .args(["call", "shell", "reloadConfig"])
+        .output()
+        .context("spawn quickshell ipc reloadConfig")?;
+    // Exit codes are unreliable (session findings), but a clean reload on a
+    // live shell exits 0; anything else gets surfaced as a soft warning.
+    if !out.status.success() {
+        return Ok(Some(format!(
+            "reloadConfig exited {}",
+            out.status.code().unwrap_or(-1)
+        )));
+    }
+    Ok(Some(String::new()))
+}
+
 /// Launch the shell detached and wait until it answers IPC ping.
 pub fn up(paths: &Paths) -> Result<()> {
     let shell_dir = shell_dir(paths)?;
