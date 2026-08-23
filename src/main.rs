@@ -6,6 +6,7 @@ mod git;
 mod hypr;
 mod paths;
 mod pin;
+mod shell;
 mod shelljson;
 
 use clap::{Args, Parser, Subcommand};
@@ -87,8 +88,26 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Up => not_implemented("up"),
-        Command::Down => not_implemented("down"),
+        Command::Up => {
+            let paths = paths::Paths::from_env();
+            match shell::up(&paths) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("opb up: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
+        Command::Down => {
+            let paths = paths::Paths::from_env();
+            match shell::down(&paths) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("opb down: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
         Command::Plugin => not_implemented("plugin"),
         Command::Select => not_implemented("select"),
         Command::Update => not_implemented("update"),
