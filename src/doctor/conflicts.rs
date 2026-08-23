@@ -63,7 +63,7 @@ pub fn scan(processes: &[String], enabled: &[&str]) -> Vec<CheckResult> {
         if enabled.contains(&BAR) && OTHER_BARS.iter().any(|n| p == n) {
             out.push(CheckResult::info(
                 BAR,
-                format!("{p} runs alongside; coexistence fine (empty layout)"),
+                format!("another bar is running: {p}"),
             ));
         }
     }

@@ -3,6 +3,7 @@
 mod bins;
 mod conflicts;
 mod env;
+mod shellcfg;
 mod version;
 
 use crate::check::Report;
@@ -26,19 +27,35 @@ pub fn report() -> Report {
         env::check_wayland(std::env::var("WAYLAND_DISPLAY").ok().as_deref()),
         env::check_desktop(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()),
     ];
-    // Enabled component ids come from `~/.config/omarchy/shell.json`, written by
-    // bootstrap and edited by select (Phases 2-3). Until then nothing is enabled,
-    // so conflict checks are skipped entirely — bootstrap-time doctor is tier 1 only.
-    let enabled: Vec<&str> = Vec::new();
-    if !enabled.is_empty() {
-        match probe("busctl", &["--user", "list", "--no-pager"]) {
-            Some(out) => checks.extend(conflicts::scan(
-                &conflicts::parse_processes(&out),
-                &enabled,
-            )),
-            None => checks.push(crate::check::CheckResult::warn(
-                "conflicts",
-                "session bus scan skipped (busctl unavailable or no bus)",
+    // Enabled components come from `~/.config/omarchy/shell.json`, written by
+    // bootstrap and edited by select (Phase 3). No file → nothing is enabled
+    // (pre-bootstrap doctor is tier 1 only). The all-off file enables exactly
+    // the bar, so the conflict scan reduces to the `omarchy.bar` INFO row until
+    // components are selected on in Phase 3.
+    let paths = crate::paths::Paths::from_env();
+    if paths.shell_json().exists() {
+        let raw = std::fs::read_to_string(paths.shell_json())
+            .unwrap_or_else(|_| String::new());
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(config) => {
+                let enabled = shellcfg::enabled_components(&config);
+                if !enabled.is_empty() {
+                    let refs: Vec<&str> = enabled.iter().map(String::as_str).collect();
+                    match probe("busctl", &["--user", "list", "--no-pager"]) {
+                        Some(out) => checks.extend(conflicts::scan(
+                            &conflicts::parse_processes(&out),
+                            &refs,
+                        )),
+                        None => checks.push(crate::check::CheckResult::warn(
+                            "conflicts",
+                            "session bus scan skipped (busctl unavailable or no bus)",
+                        )),
+                    }
+                }
+            }
+            Err(_) => checks.push(crate::check::CheckResult::warn(
+                "shell.json",
+                "exists but is unparseable; conflict checks skipped",
             )),
         }
     }
