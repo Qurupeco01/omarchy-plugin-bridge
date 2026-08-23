@@ -21,7 +21,8 @@ Follow good Rust practices and keep the code well organized — small modules wi
 - Effects stay thin: subprocess/fs helpers do one thing, return `Result`, never panic
 - Errors via `anyhow` with context at boundaries
 - No async/tokio (D3) — fully sync
-- Atomic writes (tmp file + rename) whenever state lands on disk
+- Atomic writes (tmp file + rename) whenever state lands on disk — delegate to `atomicwrites` (fsync + parent-dir fsync added in our wrapper)
+- **Prefer standard or well-known, well-maintained crates over custom hand-rolled implementations for common operations** (e.g. `atomicwrites` for atomic writes, `which` for PATH lookup). Hand-roll only what no sane crate covers (e.g. the D9 symlink flip is plain std — no crate does it); if deviating, document the reason in the code.
 
 ## Hard rules
 
