@@ -8,6 +8,7 @@ mod hypr;
 mod paths;
 mod pin;
 mod plugin;
+mod selection;
 mod shell;
 mod shelljson;
 
