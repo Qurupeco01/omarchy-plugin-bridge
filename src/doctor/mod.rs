@@ -26,14 +26,22 @@ pub fn report() -> Report {
         env::check_wayland(std::env::var("WAYLAND_DISPLAY").ok().as_deref()),
         env::check_desktop(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()),
     ];
-    let conflicts = match probe("busctl", &["--user", "list", "--no-pager"]) {
-        Some(out) => conflicts::scan(&conflicts::parse_processes(&out)),
-        None => vec![crate::check::CheckResult::warn(
-            "conflicts",
-            "session bus scan skipped (busctl unavailable or no bus)",
-        )],
-    };
-    checks.extend(conflicts);
+    // Enabled component ids come from `~/.config/omarchy/shell.json`, written by
+    // bootstrap and edited by select (Phases 2-3). Until then nothing is enabled,
+    // so conflict checks are skipped entirely — bootstrap-time doctor is tier 1 only.
+    let enabled: Vec<&str> = Vec::new();
+    if !enabled.is_empty() {
+        match probe("busctl", &["--user", "list", "--no-pager"]) {
+            Some(out) => checks.extend(conflicts::scan(
+                &conflicts::parse_processes(&out),
+                &enabled,
+            )),
+            None => checks.push(crate::check::CheckResult::warn(
+                "conflicts",
+                "session bus scan skipped (busctl unavailable or no bus)",
+            )),
+        }
+    }
     Report(checks)
 }
 

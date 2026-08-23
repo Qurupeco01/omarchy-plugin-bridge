@@ -1,8 +1,15 @@
 //! Session-bus conflict scan (CONCEPT §10 matrix).
+//! Gated per component: a conflict row is checked only when its omarchy
+//! component is enabled (same rule as tier 2). With nothing enabled there are
+//! no conflict checks at all — bootstrap-time doctor is tier 1 only.
 //! Detection is process ownership on the session bus — never binary presence:
 //! an installed-but-idle binary registers no connection and collides with nothing.
 
 use crate::check::CheckResult;
+
+pub const NOTIFICATIONS: &str = "omarchy.notifications";
+pub const POLKIT: &str = "omarchy.polkit";
+pub const BAR: &str = "omarchy.bar";
 
 /// Process names of daemons that would collide with `omarchy.notifications`.
 pub const NOTIFICATION_DAEMONS: &[&str] = &["mako", "dunst", "swaync", "fnott"];
@@ -17,7 +24,8 @@ pub const OTHER_BARS: &[&str] = &["waybar", "eww"];
 
 /// Pure: extract the PROCESS column from `busctl --user list --no-pager` output.
 /// Column 3 (index 2) on every non-header row; works for both `:1.xx` unique
-/// names and well-known-name rows.
+/// names and well-known-name rows. Deduplicated: one process may hold several
+/// bus connections and thus appear many times.
 pub fn parse_processes(busctl_out: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     busctl_out
@@ -33,25 +41,28 @@ pub fn parse_processes(busctl_out: &str) -> Vec<String> {
         .collect()
 }
 
-/// Pure: §10 matrix match against live bus processes.
-pub fn scan(processes: &[String]) -> Vec<CheckResult> {
+/// Pure: §10 matrix match against live bus processes, restricted to enabled
+/// components. Unknown components are ignored.
+pub fn scan(processes: &[String], enabled: &[&str]) -> Vec<CheckResult> {
     let mut out = Vec::new();
     for p in processes {
-        if NOTIFICATION_DAEMONS.iter().any(|n| p == n) {
+        if enabled.contains(&NOTIFICATIONS)
+            && NOTIFICATION_DAEMONS.iter().any(|n| p == n)
+        {
             out.push(CheckResult::warn(
-                "omarchy.notifications",
+                NOTIFICATIONS,
                 format!("{p} owns the notifications bus name"),
             ));
         }
-        if POLKIT_AGENTS.iter().any(|n| p.starts_with(n)) {
+        if enabled.contains(&POLKIT) && POLKIT_AGENTS.iter().any(|n| p.starts_with(n)) {
             out.push(CheckResult::warn(
-                "omarchy.polkit",
+                POLKIT,
                 format!("{p} is a polkit auth agent"),
             ));
         }
-        if OTHER_BARS.iter().any(|n| p == n) {
+        if enabled.contains(&BAR) && OTHER_BARS.iter().any(|n| p == n) {
             out.push(CheckResult::info(
-                "bar",
+                BAR,
                 format!("{p} runs alongside; coexistence fine (empty layout)"),
             ));
         }
@@ -96,20 +107,39 @@ NAME                                            PID PROCESS         USER       C
     }
 
     #[test]
-    fn detects_matrix_conflicts() {
+    fn nothing_enabled_skips_all_conflict_checks() {
+        // mako + waybar are live, but no component enabled → no rows.
         let procs = parse_processes(SNAPSHOT);
-        let hits = scan(&procs);
-        let warn: Vec<_> = hits.iter().filter(|c| matches!(c.status, Status::Warn(_))).collect();
-        assert_eq!(warn.len(), 3); // mako + hyprpolkitagent + polkit-gnome(prefix)
-        assert!(warn.iter().any(|c| c.name == "omarchy.notifications"));
-        assert!(warn.iter().any(|c| c.name == "omarchy.polkit"));
+        assert!(scan(&procs, &[]).is_empty());
+    }
+
+    #[test]
+    fn checks_only_enabled_components() {
+        let procs = parse_processes(SNAPSHOT);
+        // Only notifications enabled: polkit agent and waybar must not appear.
+        let hits = scan(&procs, &[NOTIFICATIONS]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, NOTIFICATIONS);
+        assert!(matches!(hits[0].status, Status::Warn(_)));
+    }
+
+    #[test]
+    fn all_components_enabled_detects_matrix_conflicts() {
+        let procs = parse_processes(SNAPSHOT);
+        let hits = scan(&procs, &[NOTIFICATIONS, POLKIT, BAR]);
+        let warns: Vec<_> = hits.iter().filter(|c| matches!(c.status, Status::Warn(_))).collect();
+        // mako + hyprpolkitagent + polkit-gnome(prefix match)
+        assert_eq!(warns.len(), 3);
+        assert!(warns.iter().any(|c| c.name == NOTIFICATIONS));
+        assert!(warns.iter().any(|c| c.name == POLKIT));
+        assert!(hits.iter().any(|c| c.name == BAR));
     }
 
     #[test]
     fn bar_is_informational_only() {
         let procs = parse_processes(SNAPSHOT);
-        let hits = scan(&procs);
-        let bar = hits.iter().find(|c| c.name == "bar").expect("waybar detected");
+        let hits = scan(&procs, &[BAR]);
+        let bar = hits.iter().find(|c| c.name == BAR).expect("waybar detected");
         assert!(matches!(bar.status, Status::Info(_)));
     }
 
@@ -117,12 +147,12 @@ NAME                                            PID PROCESS         USER       C
     fn idle_installed_binary_is_not_a_conflict() {
         // dunst installed but not running: absent from the bus, no hit.
         let procs = vec!["Hyprland".to_string(), "kitty".to_string()];
-        assert!(scan(&procs).is_empty());
+        assert!(scan(&procs, &[NOTIFICATIONS, POLKIT, BAR]).is_empty());
     }
 
     #[test]
-    fn empty_snapshot_yields_nothing() {
-        assert!(scan(&[]).is_empty());
-        assert!(parse_processes("").is_empty());
+    fn unknown_enabled_ids_are_ignored() {
+        let procs = parse_processes(SNAPSHOT);
+        assert!(scan(&procs, &["some.unknown"]).is_empty());
     }
 }
