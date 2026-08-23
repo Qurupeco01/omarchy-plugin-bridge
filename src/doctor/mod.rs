@@ -1,6 +1,7 @@
 //! `opb doctor` — assembles tier-1 checks (CONCEPT §10) into a report.
 
 mod bins;
+mod env;
 mod version;
 
 use crate::check::Report;
@@ -21,6 +22,8 @@ pub fn report() -> Report {
         bins::check_bin("hyprctl", hyprctl),
         bins::check_bin("git", which_ok("git")),
         bins::check_bin("bash", which_ok("bash")),
+        env::check_wayland(std::env::var("WAYLAND_DISPLAY").ok().as_deref()),
+        env::check_desktop(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()),
     ])
 }
 
