@@ -5,6 +5,8 @@
 pub enum Status {
     /// Pass, optionally with detail (e.g. detected version).
     Pass(Option<String>),
+    /// Informational — no action required, exits 0.
+    Info(String),
     Warn(String),
     Fail(String),
 }
@@ -30,6 +32,13 @@ impl CheckResult {
         }
     }
 
+    pub fn info(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: Status::Info(detail.into()),
+        }
+    }
+
     pub fn warn(name: &'static str, why: impl Into<String>) -> Self {
         Self {
             name,
@@ -47,6 +56,7 @@ impl CheckResult {
     fn label(&self) -> &'static str {
         match self.status {
             Status::Pass(_) => "PASS",
+            Status::Info(_) => "INFO",
             Status::Warn(_) => "WARN",
             Status::Fail(_) => "FAIL",
         }
@@ -59,7 +69,7 @@ impl CheckResult {
     fn detail(&self) -> Option<&str> {
         match &self.status {
             Status::Pass(d) => d.as_deref(),
-            Status::Warn(d) | Status::Fail(d) => Some(d),
+            Status::Info(d) | Status::Warn(d) | Status::Fail(d) => Some(d),
         }
     }
 }
