@@ -3,6 +3,7 @@ mod check;
 mod doctor;
 mod paths;
 mod pin;
+mod shelljson;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
