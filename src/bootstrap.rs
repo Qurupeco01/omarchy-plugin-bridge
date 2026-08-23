@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::atomic;
 use crate::git;
+use crate::hypr;
 use crate::paths::Paths;
 use crate::pin::PinLock;
 use crate::shelljson;
@@ -70,10 +71,16 @@ pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
             &paths.shell_json(),
             shelljson::render(&shelljson::generate(&ids)).as_bytes(),
         )?;
+        hypr::wire(paths, &pin_dir, true)?;
         println!("opb bootstrap: pinned {reference} at {commit}");
         println!("  pin:  {}", pin_dir.display());
         println!("  link: {} -> current", paths.current_dir().display());
         println!("  config: {}", paths.shell_json().display());
+        println!("  hypr:  {}", paths.opb_conf().display());
+        println!(
+            "  add to Hyprland: {}",
+            hypr::source_line(paths)
+        );
         Ok(())
     })();
     if result.is_err() {
@@ -115,8 +122,10 @@ fn regenerate(paths: &Paths, commit: &str, pin_dir: &Path) -> Result<()> {
         &paths.shell_json(),
         shelljson::render(&shelljson::generate(&ids)).as_bytes(),
     )?;
+    // Redo must rewrite opb.conf even though the user sources it now.
+    hypr::wire(paths, pin_dir, false)?;
     println!(
-        "opb bootstrap: regenerated shell.json against {} ({})",
+        "opb bootstrap: regenerated shell.json + opb.conf against {} ({})",
         short(commit),
         pin_dir.display()
     );

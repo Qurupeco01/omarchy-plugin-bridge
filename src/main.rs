@@ -3,6 +3,7 @@ mod bootstrap;
 mod check;
 mod doctor;
 mod git;
+mod hypr;
 mod paths;
 mod pin;
 mod shelljson;
