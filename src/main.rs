@@ -1,8 +1,10 @@
+mod check;
+
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod exit {
-    #![allow(dead_code)]
+    #![allow(dead_code)] // OK/FAIL consumed by doctor in step 2
 
     pub const OK: u8 = 0;
     pub const FAIL: u8 = 1;
@@ -48,7 +50,11 @@ fn not_implemented(cmd: &str) -> ! {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Doctor => not_implemented("doctor"),
+        Command::Doctor => {
+            let report = check::Report::default(); // checks land in steps 3-5
+            print!("{}", report.render());
+            ExitCode::from(report.exit_code())
+        }
         Command::Bootstrap => not_implemented("bootstrap"),
         Command::Up => not_implemented("up"),
         Command::Down => not_implemented("down"),
