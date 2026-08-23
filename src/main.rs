@@ -1,5 +1,8 @@
+mod atomic;
 mod check;
 mod doctor;
+mod paths;
+mod pin;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;

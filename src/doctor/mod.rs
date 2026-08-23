@@ -45,10 +45,8 @@ pub fn report() -> Report {
     Report(checks)
 }
 
-/// PATH lookup only — never executes the binary.
+/// PATH lookup only — never executes the binary. Checks executability (X_OK),
+/// unlike a bare `is_file` check (handled by the `which` crate).
 fn which_ok(bin: &str) -> bool {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(bin))
-        .any(|p| p.is_file())
+    which::which(bin).is_ok()
 }
