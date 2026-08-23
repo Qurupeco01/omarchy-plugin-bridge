@@ -2,10 +2,12 @@ mod atomic;
 mod bootstrap;
 mod check;
 mod doctor;
+mod env;
 mod git;
 mod hypr;
 mod paths;
 mod pin;
+mod plugin;
 mod shell;
 mod shelljson;
 
@@ -41,8 +43,12 @@ enum Command {
     Up,
     /// Stop the shell
     Down,
-    /// Manage plugins (passthrough to upstream)
-    Plugin,
+    /// Manage plugins (passthrough to upstream `omarchy plugin`)
+    Plugin {
+        /// Arguments forwarded verbatim, e.g. `opb plugin add owner/repo`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Enable/disable components
     Select,
     /// Update the upstream pin
@@ -108,7 +114,16 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Plugin => not_implemented("plugin"),
+        Command::Plugin { args } => {
+            let paths = paths::Paths::from_env();
+            match plugin::run(&paths, &args) {
+                Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(exit::FAIL)),
+                Err(e) => {
+                    eprintln!("opb plugin: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
         Command::Select => not_implemented("select"),
         Command::Update => not_implemented("update"),
         Command::Theme => not_implemented("theme"),

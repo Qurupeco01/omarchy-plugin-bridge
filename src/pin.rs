@@ -4,8 +4,9 @@
 //! exists today (tag pinning); `master`/agile tracking is deferred. `channel`
 //! is kept as data so the schema is forward-compatible.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 use crate::atomic;
 use crate::paths::Paths;
@@ -55,6 +56,16 @@ impl PinLock {
         let raw = self.to_toml()?;
         atomic::write(&paths.lock_file(), raw.as_bytes())
     }
+}
+
+/// Resolve the active pin: the `current` symlink target. Errors when not
+/// bootstrapped.
+pub fn active_dir(paths: &Paths) -> Result<PathBuf> {
+    let current = paths.current_dir();
+    if !current.is_symlink() {
+        bail!("not bootstrapped — run `opb bootstrap` first");
+    }
+    std::fs::read_link(&current).context("read current link")
 }
 
 #[cfg(test)]

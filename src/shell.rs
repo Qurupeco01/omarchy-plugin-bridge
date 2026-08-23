@@ -11,40 +11,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::env;
 use crate::paths::Paths;
+use crate::pin;
 
 /// The shell config dir through the `current` symlink (D9).
 pub fn shell_dir(paths: &Paths) -> Result<PathBuf> {
-    let current = paths.current_dir();
-    if !current.is_symlink() {
-        bail!("not bootstrapped — run `opb bootstrap` first");
-    }
-    Ok(current.join("shell"))
-}
-
-/// Resolve the active pin (the `current` symlink target) for env wiring.
-fn pin_dir(paths: &Paths) -> Result<PathBuf> {
-    std::fs::read_link(paths.current_dir()).context("read current link")
-}
-
-/// Process env per D-env rules: `OMARCHY_PATH` + `bin/` prepended to PATH.
-fn env_for(pin_dir: &Path, current_path: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            "OMARCHY_PATH".to_owned(),
-            pin_dir.to_string_lossy().into_owned(),
-        ),
-        ("PATH".to_owned(), prepend_bin(pin_dir, current_path)),
-    ]
-}
-
-/// `pin/bin:` prepended to the existing PATH.
-fn prepend_bin(pin_dir: &Path, current_path: &str) -> String {
-    let mut entries = vec![pin_dir.join("bin")];
-    entries.extend(std::env::split_paths(current_path));
-    std::env::join_paths(entries)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| pin_dir.join("bin").to_string_lossy().into_owned())
+    Ok(pin::active_dir(paths)?.join("shell"))
 }
 
 /// pgrep pattern for the shell process. The launched cmdline is exactly
@@ -112,11 +85,11 @@ pub fn up(paths: &Paths) -> Result<()> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         bail!("WAYLAND_DISPLAY is unset — not a Wayland session?");
     }
-    let pin_dir = pin_dir(paths)?;
+    let pin_dir = pin::active_dir(paths)?;
     let mut cmd = Command::new("setsid");
     cmd.args(["--fork", "quickshell", "-p"])
         .arg(&shell_dir)
-        .envs(env_for(&pin_dir, &std::env::var("PATH").unwrap_or_default()));
+        .envs(env::for_pin(&pin_dir));
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd.spawn().context("spawn shell")?;
 
@@ -162,21 +135,6 @@ fn signal(sig: &str, shell_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prepend_bin_prefixes_pin_bin() {
-        let pin = Path::new("/p/omarchy@abc");
-        let got = prepend_bin(pin, "/usr/bin:/bin");
-        assert_eq!(got, "/p/omarchy@abc/bin:/usr/bin:/bin");
-    }
-
-    #[test]
-    fn env_sets_omarchy_path_and_prepends() {
-        let pin = Path::new("/p/omarchy@abc");
-        let env = env_for(pin, "/usr/bin");
-        assert_eq!(env[0], ("OMARCHY_PATH".to_owned(), "/p/omarchy@abc".to_owned()));
-        assert_eq!(env[1], ("PATH".to_owned(), "/p/omarchy@abc/bin:/usr/bin".to_owned()));
-    }
 
     #[test]
     fn proc_pattern_is_contiguous_quickshell_p() {
