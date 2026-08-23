@@ -3,7 +3,8 @@
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {
-    Pass,
+    /// Pass, optionally with detail (e.g. detected version).
+    Pass(Option<String>),
     Warn(String),
     Fail(String),
 }
@@ -16,28 +17,48 @@ pub struct CheckResult {
 
 impl CheckResult {
     pub fn pass(name: &'static str) -> Self {
-        Self { name, status: Status::Pass }
+        Self {
+            name,
+            status: Status::Pass(None),
+        }
+    }
+
+    pub fn pass_info(name: &'static str, detail: &str) -> Self {
+        Self {
+            name,
+            status: Status::Pass(Some(detail.to_owned())),
+        }
     }
 
     pub fn warn(name: &'static str, why: impl Into<String>) -> Self {
-        Self { name, status: Status::Warn(why.into()) }
+        Self {
+            name,
+            status: Status::Warn(why.into()),
+        }
     }
 
     pub fn fail(name: &'static str, why: impl Into<String>) -> Self {
-        Self { name, status: Status::Fail(why.into()) }
+        Self {
+            name,
+            status: Status::Fail(why.into()),
+        }
     }
 
     fn label(&self) -> &'static str {
         match self.status {
-            Status::Pass => "PASS",
+            Status::Pass(_) => "PASS",
             Status::Warn(_) => "WARN",
             Status::Fail(_) => "FAIL",
         }
     }
 
+    fn label_and_name(&self) -> String {
+        format!("{}  {}", self.label(), self.name)
+    }
+
     fn detail(&self) -> Option<&str> {
         match &self.status {
-            Status::Pass => None,
+            Status::Pass(d) => d.as_deref(),
             Status::Warn(d) | Status::Fail(d) => Some(d),
         }
     }
@@ -66,13 +87,12 @@ impl Report {
 
         let mut out = String::new();
         for c in &self.0 {
-            out.push_str(c.label());
-            out.push_str("  ");
-            out.push_str(&format!("{:<width$}", c.name));
+            let mut line = format!("{:<width$}", c.label_and_name(), width = width + 6);
             if let Some(d) = c.detail() {
-                out.push_str("  ");
-                out.push_str(d);
+                line.push_str("  ");
+                line.push_str(d);
             }
+            out.push_str(line.trim_end());
             out.push('\n');
         }
         out
@@ -85,7 +105,7 @@ mod tests {
 
     fn sample() -> Report {
         Report(vec![
-            CheckResult::pass("quickshell"),
+            CheckResult::pass_info("quickshell", "0.3.1"),
             CheckResult::warn("gum", "not installed (interactive TUI flows only)"),
             CheckResult::fail("hyprctl", "not found in PATH"),
         ])
@@ -114,7 +134,7 @@ mod tests {
     fn renders_aligned_table() {
         let out = sample().render();
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "PASS  quickshell");
+        assert_eq!(lines[0], "PASS  quickshell  0.3.1");
         assert_eq!(
             lines[1],
             "WARN  gum         not installed (interactive TUI flows only)"

@@ -1,10 +1,11 @@
 mod check;
+mod doctor;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod exit {
-    #![allow(dead_code)] // OK/FAIL consumed by doctor in step 2
+    #![allow(dead_code)] // ERROR consumed by stubs; OK/FAIL by doctor/report
 
     pub const OK: u8 = 0;
     pub const FAIL: u8 = 1;
@@ -51,7 +52,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Doctor => {
-            let report = check::Report::default(); // checks land in steps 3-5
+            let report = doctor::report();
             print!("{}", report.render());
             ExitCode::from(report.exit_code())
         }
