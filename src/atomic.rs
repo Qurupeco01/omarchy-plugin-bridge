@@ -5,7 +5,6 @@
 //! opb adds the two things it lacks: parent-dir creation and a durability
 //! fsync of the destination directory after the rename. Symlink flips (D9) are
 //! plain std — no crate covers that, and it is only a handful of lines.
-#![allow(dead_code)] // consumed by bootstrap (C3+)
 
 use anyhow::{Context, Result};
 use atomicwrites::{AtomicFile, OverwriteBehavior};

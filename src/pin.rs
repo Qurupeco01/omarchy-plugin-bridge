@@ -3,10 +3,12 @@
 //! `upstream.lock` records `{channel, ref, commit}`. Only the `stable` channel
 //! exists today (tag pinning); `master`/agile tracking is deferred. `channel`
 //! is kept as data so the schema is forward-compatible.
-#![allow(dead_code)] // consumed by bootstrap (C3+)
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::atomic;
+use crate::paths::Paths;
 
 pub const CHANNEL_STABLE: &str = "stable";
 
@@ -36,6 +38,23 @@ impl PinLock {
     pub fn from_toml(s: &str) -> Result<Self> {
         toml::from_str(s).context("parse upstream.lock")
     }
+
+    /// Load the lock file; `None` when not bootstrapped yet.
+    pub fn load(paths: &Paths) -> Result<Option<Self>> {
+        let file = paths.lock_file();
+        if !file.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&file)
+            .with_context(|| format!("read {}", file.display()))?;
+        Ok(Some(Self::from_toml(&raw)?))
+    }
+
+    /// Persist atomically — never a half-written lock.
+    pub fn save(&self, paths: &Paths) -> Result<()> {
+        let raw = self.to_toml()?;
+        atomic::write(&paths.lock_file(), raw.as_bytes())
+    }
 }
 
 #[cfg(test)]
@@ -64,5 +83,16 @@ mod tests {
     #[test]
     fn rejects_malformed_toml() {
         assert!(PinLock::from_toml("channel = 5").is_err());
+    }
+
+    #[test]
+    fn load_save_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        assert!(PinLock::load(&paths).unwrap().is_none());
+
+        let lock = PinLock::stable("v4.0.0", "0123456789abcdef0123456789abcdef01234567");
+        lock.save(&paths).unwrap();
+        assert_eq!(PinLock::load(&paths).unwrap().unwrap(), lock);
     }
 }

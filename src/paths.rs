@@ -11,7 +11,6 @@
 //!
 //! Pure (env reads happen in `from_env` only) — fully unit-testable by
 //! injecting roots.
-#![allow(dead_code)] // consumed by bootstrap (C3+)
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +25,8 @@ pub const LOCK_FILENAME: &str = "upstream.lock";
 pub struct Paths {
     home: PathBuf,
     data_root: PathBuf,
+    // Consumed by C4 (opb.conf lives under the hypr config dir).
+    #[allow(dead_code)]
     config_root: PathBuf,
 }
 
@@ -43,6 +44,7 @@ impl Paths {
 
     /// Default-layout constructor (XDG vars unset): `~/.local/share` +
     /// `~/.config`. Used by tests; matches what `from_env` yields by default.
+    #[allow(dead_code)]
     pub fn new(home: PathBuf) -> Self {
         let data_root = home.join(".local/share");
         let config_root = home.join(".config");
@@ -58,6 +60,7 @@ impl Paths {
         }
     }
 
+    #[allow(dead_code)]
     pub fn home(&self) -> &Path {
         &self.home
     }
@@ -103,11 +106,13 @@ impl Paths {
     }
 
     /// Hyprland's config dir (XDG-aware): `…/hypr`.
+    #[allow(dead_code)] // consumed by C4 (opb.conf)
     pub fn hypr_config_dir(&self) -> PathBuf {
         self.config_root.join("hypr")
     }
 
     /// `…/hypr/opb.conf` — the managed Hyprland block (D8).
+    #[allow(dead_code)] // consumed by C4 (opb.conf)
     pub fn opb_conf(&self) -> PathBuf {
         self.hypr_config_dir().join("opb.conf")
     }

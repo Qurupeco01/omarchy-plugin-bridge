@@ -4,7 +4,6 @@
 //! `disabledPlugins[]` (PluginRegistry.isEnabled). An all-off config therefore
 //! lists exactly those ids there. Bar-widgets too: empty layout means nothing
 //! renders, but loading the component is not "off".
-#![allow(dead_code)] // consumed by bootstrap (C3+)
 
 use anyhow::{Context, Result};
 use serde::Deserialize;

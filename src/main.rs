@@ -1,11 +1,13 @@
 mod atomic;
+mod bootstrap;
 mod check;
 mod doctor;
+mod git;
 mod paths;
 mod pin;
 mod shelljson;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::process::ExitCode;
 
 mod exit {
@@ -32,7 +34,7 @@ enum Command {
     /// Check dependencies and conflicts on this machine
     Doctor,
     /// Clone and pin upstream omarchy, generate shell.json, wire Hyprland
-    Bootstrap,
+    Bootstrap(BootstrapArgs),
     /// Launch the pinned shell
     Up,
     /// Stop the shell
@@ -45,6 +47,16 @@ enum Command {
     Update,
     /// Delegate to upstream theme scripts
     Theme,
+}
+
+#[derive(Args)]
+struct BootstrapArgs {
+    /// Upstream ref to pin (a release tag); defaults to the newest tag
+    #[arg(long = "ref", value_name = "TAG")]
+    reference: Option<String>,
+    /// Regenerate generated artifacts against the existing pin (no re-clone)
+    #[arg(long)]
+    redo: bool,
 }
 
 fn not_implemented(cmd: &str) -> ! {
@@ -60,7 +72,20 @@ fn main() -> ExitCode {
             print!("{}", report.render());
             ExitCode::from(report.exit_code())
         }
-        Command::Bootstrap => not_implemented("bootstrap"),
+        Command::Bootstrap(args) => {
+            let paths = paths::Paths::from_env();
+            let opts = bootstrap::BootstrapOptions {
+                reference: args.reference,
+                redo: args.redo,
+            };
+            match bootstrap::run(&paths, &opts) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("opb bootstrap: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
         Command::Up => not_implemented("up"),
         Command::Down => not_implemented("down"),
         Command::Plugin => not_implemented("plugin"),
