@@ -92,6 +92,87 @@ pub fn is_managed(src: &str) -> bool {
     src.trim_start().starts_with(MANAGED_MARKER)
 }
 
+// --- Managed require block -------------------------------------------------
+//
+// `opb enable` offers to write the activation line itself, as a marker-scoped
+// block so `opb disable` can remove exactly what it added — nothing else,
+// even if the user moved or reformatted the surrounding file.
+
+pub const REQUIRE_BEGIN: &str = "-- BEGIN opb (managed by `opb enable`; remove with `opb disable`)";
+pub const REQUIRE_END: &str = "-- END opb";
+
+/// The exact managed block we write into the user's hyprland.lua.
+pub fn require_block() -> String {
+    format!("{REQUIRE_BEGIN}\n{}\n{REQUIRE_END}\n", require_hint())
+}
+
+/// Pure: strip every managed block from a config, returning (cleaned, removed).
+/// Only lines inside BEGIN/END markers are touched.
+fn strip_require_blocks(src: &str) -> (String, bool) {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    let mut removed = false;
+    for line in src.lines() {
+        let t = line.trim_end();
+        if t == REQUIRE_BEGIN {
+            inside = true;
+            removed = true;
+            continue;
+        }
+        if inside {
+            if t == REQUIRE_END {
+                inside = false;
+            }
+            continue;
+        }
+        kept.push(line);
+    }
+    let mut cleaned = kept.join("\n");
+    while cleaned.ends_with("\n\n") {
+        cleaned.pop();
+    }
+    if !cleaned.is_empty() && !cleaned.ends_with('\n') {
+        cleaned.push('\n');
+    }
+    (cleaned, removed)
+}
+
+/// Append the managed block. Idempotent: no-op when any form of activation is
+/// already present. Returns whether the file was modified.
+pub fn write_require_block(paths: &Paths) -> Result<bool> {
+    let path = paths.hyprland_lua();
+    let src = std::fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    if already_required(&src) {
+        return Ok(false);
+    }
+    let mut next = src.clone();
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(&require_block());
+    atomic::write(&path, next.as_bytes())?;
+    Ok(true)
+}
+
+/// Remove our managed block(s). Hand-written activation lines are left alone
+/// — only marker-scoped content qualifies as ours. Returns whether the file
+/// was modified.
+pub fn remove_require_block(paths: &Paths) -> Result<bool> {
+    let path = paths.hyprland_lua();
+    if !path.exists() {
+        return Ok(false);
+    }
+    let src = std::fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let (cleaned, removed) = strip_require_blocks(&src);
+    if !removed {
+        return Ok(false);
+    }
+    atomic::write(&path, cleaned.as_bytes())?;
+    Ok(true)
+}
+
 /// Outcome of `opb enable` worth reporting to the user.
 pub struct EnableReport {
     /// A stale managed `opb.conf` from the hyprlang era was removed.
@@ -279,6 +360,74 @@ mod tests {
 
         // Second run: nothing left to remove, still a success.
         assert!(!disable(&p).unwrap());
+    }
+
+    #[test]
+    fn require_block_is_self_describing_and_detectable() {
+        let block = require_block();
+        assert!(block.contains(REQUIRE_BEGIN));
+        assert!(block.contains(REQUIRE_END));
+        assert!(already_required(&block));
+    }
+
+    #[test]
+    fn strip_require_blocks_removes_only_marked_lines() {
+        let src = "local a = 1\n\n\
+                   -- BEGIN opb (managed by `opb enable`; remove with `opb disable`)\n\
+                   require(\"opb\")\n\
+                   -- END opb\n\
+                   local b = 2\n";
+        let (cleaned, removed) = strip_require_blocks(src);
+        assert!(removed);
+        assert_eq!(cleaned, "local a = 1\n\nlocal b = 2\n");
+        assert!(!already_required(&cleaned));
+    }
+
+    #[test]
+    fn strip_is_noop_without_block_and_tolerates_unclosed_block() {
+        let plain = "require(\"binds\")\n";
+        let (out, removed) = strip_require_blocks(plain);
+        assert!(!removed);
+        assert_eq!(out, plain);
+
+        // A BEGIN without END swallows to EOF — still only our lines at risk.
+        let broken = "x = 1\n-- BEGIN opb (managed by `opb enable`; remove with `opb disable`)\nrequire(\"opb\")\n";
+        let (out, removed) = strip_require_blocks(broken);
+        assert!(removed);
+        assert_eq!(out, "x = 1\n");
+    }
+
+    #[test]
+    fn write_then_remove_round_trips_hyprland_lua() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(dir.path());
+        fs::create_dir_all(p.hypr_config_dir()).unwrap();
+        fs::write(p.hyprland_lua(), "require(\"binds\")\n").unwrap();
+
+        assert!(write_require_block(&p).unwrap());
+        let with_block = fs::read_to_string(p.hyprland_lua()).unwrap();
+        assert!(with_block.contains("require(\"opb\")"));
+        assert!(with_block.starts_with("require(\"binds\")\n"));
+
+        // Idempotent: second write is a no-op.
+        assert!(!write_require_block(&p).unwrap());
+
+        // Hand-written activation also counts as present.
+        let hand = "require('opb')\n";
+        fs::write(p.hyprland_lua(), hand).unwrap();
+        assert!(!write_require_block(&p).unwrap());
+        // …and removal strips nothing — only marker-scoped content is ours.
+        assert!(!remove_require_block(&p).unwrap());
+        assert_eq!(fs::read_to_string(p.hyprland_lua()).unwrap(), hand);
+
+        // Removal strips exactly our block, preserving the rest.
+        fs::write(p.hyprland_lua(), &with_block).unwrap();
+        assert!(remove_require_block(&p).unwrap());
+        assert!(!remove_require_block(&p).unwrap());
+        assert_eq!(
+            fs::read_to_string(p.hyprland_lua()).unwrap(),
+            "require(\"binds\")\n"
+        );
     }
 
     fn paths_opb_lua_exists(p: &Paths) -> bool {

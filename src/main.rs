@@ -43,8 +43,9 @@ enum Command {
     /// Clone and pin upstream omarchy, generate shell.json
     Bootstrap(BootstrapArgs),
     /// Install session wiring: autostart the shell each Hyprland start
-    /// (idempotent; activate with require("opb") in your Hyprland Lua config)
-    Enable,
+    /// (idempotent). Offers to add require("opb") to your Hyprland Lua config
+    /// as a marker-managed block
+    Enable(EnableArgs),
     /// Remove the session wiring (keybinds in keys.lua stay yours)
     Disable,
     /// Launch the pinned shell
@@ -78,6 +79,16 @@ struct BootstrapArgs {
 }
 
 #[derive(Args)]
+struct EnableArgs {
+    /// Accept prompts (write the require block without asking)
+    #[arg(long)]
+    yes: bool,
+    /// Never touch hyprland.lua — print the activation line instead
+    #[arg(long = "no-line")]
+    no_line: bool,
+}
+
+#[derive(Args)]
 struct UpdateArgs {
     #[command(subcommand)]
     command: Option<UpdateCommand>,
@@ -104,8 +115,9 @@ fn not_implemented(cmd: &str) -> ! {
 }
 
 /// `opb enable` — install/regenerate the managed opb.lua against the active
-/// pin (D15). Never edits the user's hyprland.lua; prints the require line.
-fn enable(paths: &paths::Paths) -> anyhow::Result<()> {
+/// pin (D15), then handle the activation line: write it as a marker-managed
+/// block on consent, or print it for manual pasting.
+fn enable(paths: &paths::Paths, args: &EnableArgs) -> anyhow::Result<()> {
     let Some((commit, pin_dir)) = bootstrap::current_pin(paths)? else {
         anyhow::bail!("not bootstrapped yet — run `opb bootstrap` first");
     };
@@ -114,27 +126,66 @@ fn enable(paths: &paths::Paths) -> anyhow::Result<()> {
     if report.legacy_conf_removed {
         println!("  removed stale managed opb.conf (hyprlang era)");
     }
-    if report.needs_require_line {
-        println!("  activate by adding this line to your Hyprland Lua config:");
-        println!("    {}", hypr::require_hint());
-    } else {
+    if !report.needs_require_line {
         println!("  already activated via require(\"opb\") in your Hyprland config");
+        return Ok(());
+    }
+    let hyprland_lua = paths.hyprland_lua();
+    if args.no_line {
+        print_require_hint(&hyprland_lua);
+        return Ok(());
+    }
+    let write = args.yes
+        || (std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && prompt_default_yes(&format!(
+                "Add {} to {}",
+                hypr::require_hint(),
+                hyprland_lua.display()
+            )));
+    if write {
+        if hypr::write_require_block(paths)? {
+            println!("  added managed activation block to {}", hyprland_lua.display());
+        } else {
+            println!("  activation already present in {}", hyprland_lua.display());
+        }
+    } else {
+        print_require_hint(&hyprland_lua);
     }
     Ok(())
 }
 
-/// `opb disable` — remove the managed wiring. keys.lua and the user's own
-/// config lines are untouched (D15).
+fn print_require_hint(hyprland_lua: &std::path::Path) {
+    println!("  activate by adding this line to {}:", hyprland_lua.display());
+    println!("    {}", hypr::require_hint());
+}
+
+/// [Y/n] prompt — Enter means yes. Only called on a TTY.
+fn prompt_default_yes(question: &str) -> bool {
+    use std::io::Write;
+    print!("{question} [Y/n] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+}
+
+/// `opb disable` — remove the managed wiring: opb.lua, the marker-scoped
+/// activation block, and any stale legacy artifacts. keys.lua and everything
+/// else in the user's config are untouched (D15).
 fn disable(paths: &paths::Paths) -> anyhow::Result<()> {
     if hypr::disable(paths)? {
-        println!(
-            "opb disable: removed {}",
-            paths.opb_lua().display()
-        );
+        println!("opb disable: removed {}", paths.opb_lua().display());
     } else {
         println!("opb disable: no session wiring installed");
     }
-    println!("  remove the require(\"opb\") line from your Hyprland Lua config, if present");
+    if hypr::remove_require_block(paths)? {
+        println!("  removed managed activation block from {}", paths.hyprland_lua().display());
+    } else {
+        println!(
+            "  remove the require(\"opb\") line from {} manually, if you added one",
+            paths.hyprland_lua().display()
+        );
+    }
     Ok(())
 }
 
@@ -160,9 +211,9 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Enable => {
+        Command::Enable(args) => {
             let paths = paths::Paths::from_env();
-            match enable(&paths) {
+            match enable(&paths, &args) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb enable: {e:#}");

@@ -144,16 +144,24 @@ pub fn report(paths: &Paths) -> Report {
     }
 
     // Session persistence is its own consent switch (D15) — report, never judge.
-    if paths.opb_lua().exists() {
-        checks.push(CheckResult::pass_info(
+    // Enabled = managed wiring present AND activated in the user's config.
+    let wired = paths.opb_lua().exists();
+    let required = std::fs::read_to_string(paths.hyprland_lua())
+        .map(|src| crate::hypr::already_required(&src))
+        .unwrap_or(false);
+    match (wired, required) {
+        (true, true) => checks.push(CheckResult::pass_info(
             "session wiring",
             "enabled (autostarts with Hyprland)",
-        ));
-    } else {
-        checks.push(CheckResult::info(
+        )),
+        (true, false) => checks.push(CheckResult::warn(
+            "session wiring",
+            "installed but not activated — run `opb enable` to add require(\"opb\")",
+        )),
+        _ => checks.push(CheckResult::info(
             "session wiring",
             "disabled — `opb enable` to autostart",
-        ));
+        )),
     }
 
     // Network last so local answers render even when offline.
