@@ -26,6 +26,18 @@ pub struct PinLock {
     pub reference: String,
     /// Resolved full commit sha the pin dir was cloned at.
     pub commit: String,
+    /// Generation we can flip back to (kept on disk by retention pruning).
+    /// `None` right after bootstrap; set by every later flip so that
+    /// rollback is always a mirror image. Absent field in older lock files
+    /// deserializes as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<PreviousPin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviousPin {
+    pub reference: String,
+    pub commit: String,
 }
 
 impl PinLock {
@@ -34,7 +46,17 @@ impl PinLock {
             channel: CHANNEL_STABLE.to_owned(),
             reference: reference.into(),
             commit: commit.into(),
+            previous: None,
         }
+    }
+
+    /// Chain this pin onto `lock` as its rollback generation.
+    pub fn with_previous(mut self, lock: &Self) -> Self {
+        self.previous = Some(PreviousPin {
+            reference: lock.reference.clone(),
+            commit: lock.commit.clone(),
+        });
+        self
     }
 
     pub fn to_toml(&self) -> Result<String> {
@@ -126,6 +148,19 @@ mod tests {
         let lock = PinLock::stable("v4.0.0", "0123456789abcdef0123456789abcdef01234567");
         let s = lock.to_toml().unwrap();
         assert_eq!(PinLock::from_toml(&s).unwrap(), lock);
+    }
+
+    #[test]
+    fn previous_generation_round_trips_and_reads_legacy_files() {
+        let next = PinLock::stable("v4.1.0", "aaa")
+            .with_previous(&PinLock::stable("v4.0.0", "bbb"));
+        let s = next.to_toml().unwrap();
+        assert_eq!(PinLock::from_toml(&s).unwrap(), next);
+
+        // A lock written before generations existed must keep loading.
+        let legacy = "channel = \"stable\"\nref = \"v4.0.0\"\ncommit = \"abc\"\n";
+        let lock = PinLock::from_toml(legacy).unwrap();
+        assert_eq!(lock.previous, None);
     }
 
     #[test]

@@ -144,6 +144,15 @@ pub struct UpdateOptions {
     /// Explicit id renames applied during down-window reconciliation
     /// (`--rename old=new`).
     pub renames: Vec<(String, String)>,
+/// Skip the interactive confirm.
+pub yes: bool,
+}
+
+/// `opb update rollback` options.
+#[derive(Debug, Default, Clone)]
+pub struct RollbackOptions {
+    /// Explicit id renames applied during down-window reconciliation.
+    pub renames: Vec<(String, String)>,
     /// Skip the interactive confirm.
     pub yes: bool,
 }
@@ -170,9 +179,9 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
     if plan.is_up_to_date() {
         return Ok(());
     }
-    confirm(&plan, opts.yes)?;
+    confirm_msg("proceed?", opts.yes)?;
 
-    PinLock::load(paths)?.context("not bootstrapped — run `opb bootstrap` first")?;
+    let lock = PinLock::load(paths)?.context("not bootstrapped — run `opb bootstrap` first")?;
     let old_pin_dir = pin::active_dir(paths)?;
     let old_ids = shelljson::first_party_non_bar_ids(&old_pin_dir.join("shell/plugins"))?;
 
@@ -212,10 +221,14 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
     std::fs::rename(&tmp, &new_pin_dir)
         .with_context(|| format!("move clone to {}", new_pin_dir.display()))?;
     atomic::symlink_flip(&new_pin_dir, &paths.current_dir())?;
-    PinLock::stable(&plan.reference, &commit).save(paths)?;
+    PinLock::stable(&plan.reference, &commit)
+        .with_previous(&lock)
+        .save(paths)?;
 
     // Sanctioned shell.json write (D14): reconcile against the new pin's ids.
     reconcile_shell_json(paths, &old_ids, &new_pin_dir, &opts.renames)?;
+
+    prune_generations(paths)?;
 
     if was_running {
         crate::shell::up(paths)?;
@@ -230,6 +243,94 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
     Ok(())
 }
 
+/// `opb update rollback` — flip back to the previous generation through the
+/// same down-window discipline as an update (including reconciliation against
+/// the restored pin's id set). The flip is symmetric: the generation we leave
+/// becomes the new previous, so a second rollback undoes it. Retention keeps
+/// exactly two generations on disk.
+pub fn rollback(paths: &Paths, opts: &RollbackOptions) -> Result<()> {
+    let lock = PinLock::load(paths)?.context("not bootstrapped — run `opb bootstrap` first")?;
+    let Some(prev) = lock.previous.clone() else {
+        bail!(
+            "no previous generation to roll back to — rollback exists only \
+             right after an update"
+        )
+    };
+    let prev_dir = paths.pin_dir(&prev.commit);
+    if !prev_dir.is_dir() {
+        bail!(
+            "previous generation dir for {} is gone — cannot roll back",
+            short(&prev.commit)
+        );
+    }
+    println!(
+        "opb update rollback: {} ({}) -> {} ({})",
+        short(&lock.commit),
+        lock.reference,
+        short(&prev.commit),
+        prev.reference
+    );
+    confirm_msg("proceed?", opts.yes)?;
+
+    let leaving_dir = pin::active_dir(paths)?;
+    let leaving_ids =
+        shelljson::first_party_non_bar_ids(&leaving_dir.join("shell/plugins"))?;
+
+    let was_running = crate::shell::is_running(paths);
+    if was_running {
+        crate::shell::down(paths)?;
+    }
+    atomic::symlink_flip(&prev_dir, &paths.current_dir())?;
+    PinLock::stable(&prev.reference, &prev.commit)
+        .with_previous(&lock)
+        .save(paths)?;
+
+    reconcile_shell_json(paths, &leaving_ids, &prev_dir, &opts.renames)?;
+    prune_generations(paths)?;
+
+    if was_running {
+        crate::shell::up(paths)?;
+    } else {
+        println!("opb update rollback: shell was not running — start with `opb up`");
+    }
+    println!("opb update rollback: now pinned at {} ({})", short(&prev.commit), prev.reference);
+    Ok(())
+}
+
+/// Keep exactly two generations on disk: the active pin and its recorded
+/// previous. Any other `omarchy@*` dir is removed. Transient `.clone-tmp*` /
+/// `.update-tmp*` dirs belong to their own flows and are left alone.
+pub fn prune_generations(paths: &Paths) -> Result<()> {
+    let Some(lock) = PinLock::load(paths)? else {
+        return Ok(()); // nothing pinned yet; nothing to prune
+    };
+    let mut keep: Vec<&str> = vec![&lock.commit];
+    if let Some(prev) = &lock.previous {
+        keep.push(&prev.commit);
+    }
+    for entry in std::fs::read_dir(paths.upstream_dir())
+        .with_context(|| format!("read {}", paths.upstream_dir().display()))?
+    {
+        let entry = entry.with_context(|| "read upstream dir entry")?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(crate::paths::PIN_DIRNAME_PREFIX) {
+            continue;
+        }
+        let commit = name
+            .strip_prefix(crate::paths::PIN_DIRNAME_PREFIX)
+            .unwrap_or(&name);
+        if keep.contains(&commit) {
+            continue;
+        }
+        std::fs::remove_dir_all(entry.path()).with_context(|| {
+            format!("prune old generation {}", entry.path().display())
+        })?;
+        println!("opb update: pruned old generation {commit}");
+    }
+    Ok(())
+}
+
 fn exit_fail() -> u8 {
     1
 }
@@ -238,11 +339,11 @@ fn short(commit: &str) -> String {
     commit.chars().take(8).collect()
 }
 
-fn confirm(_plan: &UpdatePlan, yes: bool) -> Result<()> {
+fn confirm_msg(prompt: &str, yes: bool) -> Result<()> {
     if yes {
         return Ok(());
     }
-    print!("proceed? [y/N] ");
+    println!("{prompt} [y/N]");
     std::io::stdout().flush().ok();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
@@ -527,5 +628,123 @@ mod tests {
             ..Default::default()
         };
         assert!(render_report(&report).contains("enabled by upstream default"));
+    }
+
+    // --- generations & rollback ---
+
+    use crate::atomic;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// Fake pin dir with a minimal plugins tree; returns its commit name.
+    fn fake_generation(paths: &Paths, commit: &str, plugin_ids: &[&str]) -> PathBuf {
+        let dir = paths.pin_dir(commit);
+        fs::create_dir_all(dir.join("shell/plugins/_x")).unwrap();
+        fs::write(dir.join("version"), "4.0.0.alpha\n").unwrap();
+        for id in plugin_ids {
+            let m = serde_json::json!({ "id": id, "kinds": ["service"] });
+            fs::write(
+                dir.join(format!("shell/plugins/_x/{id}.manifest.json")),
+                serde_json::to_vec(&m).unwrap(),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    fn activate(paths: &Paths, reference: &str, commit: &str, prev: Option<(&str, &str)>) {
+        let mut lock = PinLock::stable(reference, commit);
+        if let Some((r, c)) = prev {
+            lock = lock.with_previous(&PinLock::stable(r, c));
+        }
+        lock.save(paths).unwrap();
+        atomic::symlink_flip(&paths.pin_dir(commit), &paths.current_dir()).unwrap();
+    }
+
+    #[test]
+    fn prune_keeps_active_and_previous_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        fake_generation(&paths, "aaa", &[]);
+        fake_generation(&paths, "bbb", &[]);
+        fake_generation(&paths, "ccc", &[]);
+        activate(&paths, "v4.1.0", "bbb", Some(("v4.0.0", "aaa")));
+
+        super::prune_generations(&paths).unwrap();
+
+        assert!(paths.pin_dir("aaa").is_dir());
+        assert!(paths.pin_dir("bbb").is_dir());
+        assert!(!paths.pin_dir("ccc").exists(), "unreferenced generation must go");
+    }
+
+    #[test]
+    fn rollback_flips_link_lock_and_shell_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        // aaa ships clock+lock, bbb (current) ships clock only and the shell
+        // json was reconciled to bbb's set.
+        fake_generation(&paths, "aaa", &["omarchy.clock", "omarchy.lock"]);
+        fake_generation(&paths, "bbb", &["omarchy.clock"]);
+        activate(&paths, "v4.1.0", "bbb", Some(("v4.0.0", "aaa")));
+        atomic::write(
+            &paths.shell_json(),
+            shelljson::render(&shelljson::generate(&["omarchy.clock".to_owned()]))
+                .as_bytes(),
+        )
+        .unwrap();
+
+        super::rollback(
+            &paths,
+            &super::RollbackOptions { renames: vec![], yes: true },
+        )
+        .unwrap();
+
+        // Link flipped back; lock now describes aaa with bbb as previous
+        // (a second rollback undoes this one).
+        assert_eq!(
+            std::fs::read_link(paths.current_dir()).unwrap(),
+            paths.pin_dir("aaa")
+        );
+        let lock = PinLock::load(&paths).unwrap().unwrap();
+        assert_eq!(lock.commit, "aaa");
+        assert_eq!(lock.reference, "v4.0.0");
+        let prev = lock.previous.unwrap();
+        assert_eq!((prev.reference.as_str(), prev.commit.as_str()), ("v4.1.0", "bbb"));
+
+        // shell.json reconciled against aaa's set: lock re-disabled.
+        let raw = fs::read_to_string(paths.shell_json()).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let disabled: Vec<_> =
+            cfg["disabledPlugins"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(disabled.contains(&"omarchy.lock"));
+    }
+
+    #[test]
+    fn rollback_without_previous_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        fake_generation(&paths, "aaa", &[]);
+        activate(&paths, "v4.0.0", "aaa", None);
+
+        let err = format!(
+            "{:#}",
+            super::rollback(&paths, &super::RollbackOptions { renames: vec![], yes: true })
+                .unwrap_err()
+        );
+        assert!(err.contains("no previous generation"), "got: {err}");
+    }
+
+    #[test]
+    fn rollback_when_previous_dir_vanished_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        fake_generation(&paths, "bbb", &[]);
+        // previous recorded but its dir was deleted by hand.
+        activate(&paths, "v4.1.0", "bbb", Some(("v4.0.0", "aaa")));
+
+        assert!(
+            super::rollback(&paths, &super::RollbackOptions { renames: vec![], yes: true })
+                .is_err()
+        );
     }
 }

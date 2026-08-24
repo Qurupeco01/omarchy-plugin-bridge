@@ -71,15 +71,23 @@ struct BootstrapArgs {
 
 #[derive(Args)]
 struct UpdateArgs {
+    #[command(subcommand)]
+    command: Option<UpdateCommand>,
     /// Target ref to pin (a release tag); defaults to the newest tag
-    #[arg(long = "ref", value_name = "REF")]
+    #[arg(long = "ref", value_name = "REF", global = true)]
     reference: Option<String>,
     /// First-party id renamed upstream, as OLD=NEW (repeatable)
-    #[arg(long = "rename", value_name = "OLD=NEW")]
+    #[arg(long = "rename", value_name = "OLD=NEW", global = true)]
     renames: Vec<String>,
     /// Skip the confirmation prompt
-    #[arg(long)]
+    #[arg(long, global = true)]
     yes: bool,
+}
+
+#[derive(Subcommand)]
+enum UpdateCommand {
+    /// Flip back to the previous pin generation
+    Rollback,
 }
 
 fn not_implemented(cmd: &str) -> ! {
@@ -153,12 +161,21 @@ fn main() -> ExitCode {
                     return ExitCode::from(exit::FAIL);
                 }
             };
-            let opts = update::UpdateOptions {
-                reference: args.reference,
-                renames,
-                yes: args.yes,
+            let result = match args.command {
+                Some(UpdateCommand::Rollback) => update::rollback(
+                    &paths,
+                    &update::RollbackOptions { renames, yes: args.yes },
+                ),
+                None => update::run(
+                    &paths,
+                    &update::UpdateOptions {
+                        reference: args.reference,
+                        renames,
+                        yes: args.yes,
+                    },
+                ),
             };
-            match update::run(&paths, &opts) {
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb update: {e:#}");
