@@ -3,12 +3,16 @@
 //! enable/disable/placement semantics end-to-end (D13), driving them over
 //! IPC so the running shell is the single writer of shell.json.
 //!
-//! opb adds exactly two things:
-//! - the environment (OMARCHY_PATH, PATH prepend)
-//! - a §10 conflict pre-flight on `plugin enable <id>`: detected collisions
-//!   are shown and confirmed before anything runs (`--yes` skips the prompt;
-//!   the flag is consumed only for enable/disable, where upstream has no use
-//!   for it — other verbs forward it untouched for upstream's own flows)
+//! Routing (CONCEPT §4 Plugin model):
+//! - bare `plugin` / `-h` / `--help` → opb-branded static help (upstream's
+//!   verbatim help leaks branding and hides our additions; drift is guarded
+//!   by the CI sentinel on `bin/omarchy-plugin-*`)
+//! - bare `list` → the read-only x-ray (`plugin_list`) — upstream's list is
+//!   IPC-only and shows no conflicts; ours works headless
+//! - args containing `--upstream` → flag consumed, rest forwarded verbatim
+//!   (raw upstream view; skips all opb additions by design)
+//! - everything else → forwarded verbatim, plus a §10 conflict pre-flight on
+//!   `enable <id>` (`--yes` skips; consumed only there)
 //!
 //! stdio is inherited so interactive flows and warnings surface verbatim;
 //! upstream's exit code propagates (signal death → 1).
@@ -21,30 +25,99 @@ use crate::env;
 use crate::paths::Paths;
 use crate::pin;
 
-/// Run `bin/omarchy plugin <args…>` inside the active pin; returns its exit code.
-pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
-    let pin_dir = pin::active_dir(paths)?;
-    let omarchy = pin_dir.join("bin/omarchy");
-    if !omarchy.is_file() {
-        bail!("upstream helper missing: {}", omarchy.display());
-    }
+/// Where a `plugin …` arg vector goes.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    Help,
+    ListXray,
+    Forward(Vec<String>),
+}
 
-    // Conflict pre-flight: only for toggles, and only enable can create a
-    // collision (§10 matrix rows are about running alternatives).
-    let forward: Vec<String> = match extract_toggle(args) {
-        Some((verb, id, rest)) => {
-            let (consent, mut rest) = take_consent(&rest);
-            if verb == "enable" && !consent && !confirm_enable(paths, &id)? {
-                println!("opb plugin: aborted");
-                return Ok(1);
-            }
-            let mut rebuilt = vec![verb, id];
-            rebuilt.append(&mut rest);
-            rebuilt
+/// Pure arg routing. `--upstream` anywhere wins: raw passthrough of the rest.
+pub fn route(args: &[String]) -> Route {
+    if args.is_empty()
+        || args == ["-h"]
+        || args == ["--help"]
+        || args == ["help"] // clap muscle memory; upstream has no such verb
+    {
+        return Route::Help;
+    }
+    let stripped: Vec<String> = args
+        .iter()
+        .filter(|a| a.as_str() != "--upstream")
+        .cloned()
+        .collect();
+    if stripped.len() != args.len() {
+        return Route::Forward(stripped);
+    }
+    if stripped.as_slice() == ["list"] {
+        return Route::ListXray;
+    }
+    Route::Forward(stripped)
+}
+
+const HELP: &str = "\
+opb plugin — manage omarchy-shell plugins (thin wrapper over upstream)
+
+Acquire:
+  opb plugin add <git-url> [--enable] [--yes]  add a plugin from git
+  opb plugin clone <source-id> [--edit]        clone a built-in plugin into your config
+  opb plugin remove [id] [--yes]               remove an installed plugin
+  opb plugin update [id] [--yes]               update git-managed plugins
+
+Activate (requires a running shell — `opb up`; state persists via IPC):
+  opb plugin enable <id> [placement]           placement: --section left|center|right,
+                                               --index N, --before/--after <widget-id>
+  opb plugin disable <id>
+
+Inspect:
+  opb plugin list                              installed plugins × enabled state × live conflicts
+  opb plugin list --json                       machine-readable output (forwarded to upstream)
+  opb plugin list --upstream                   raw upstream view over IPC (needs running shell)
+  opb plugin validate <folder>                 validate a manifest folder
+
+opb additions: enable prompts before activating a component that collides with a
+running service (§10); pass --yes to skip. Other flags forward untouched.
+";
+
+/// Run `bin/omarchy plugin <args…>` per the routing above; returns the exit code.
+pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
+    match route(args) {
+        Route::Help => {
+            print!("{HELP}");
+            Ok(0)
         }
-        None => args.to_vec(),
-    };
-    exec(&omarchy, &pin_dir, &forward)
+        Route::ListXray => {
+            let processes = crate::doctor::live_bus_processes().unwrap_or_default();
+            let rows = crate::plugin_list::list_rows(paths, &processes)?;
+            print!("{}", crate::plugin_list::render_rows(&rows));
+            Ok(0)
+        }
+        Route::Forward(forward) => {
+            let pin_dir = pin::active_dir(paths)?;
+            let omarchy = pin_dir.join("bin/omarchy");
+            if !omarchy.is_file() {
+                bail!("upstream helper missing: {}", omarchy.display());
+            }
+
+            // Conflict pre-flight: only for toggles, and only enable can create
+            // a collision (§10 matrix rows are about running alternatives).
+            let forward = match extract_toggle(&forward) {
+                Some((verb, id, rest)) => {
+                    let (consent, mut rest) = take_consent(&rest);
+                    if verb == "enable" && !consent && !confirm_enable(paths, &id)? {
+                        println!("opb plugin: aborted");
+                        return Ok(1);
+                    }
+                    let mut rebuilt = vec![verb, id];
+                    rebuilt.append(&mut rest);
+                    rebuilt
+                }
+                None => forward,
+            };
+            exec(&omarchy, &pin_dir, &forward)
+        }
+    }
 }
 
 fn exec(
@@ -169,10 +242,46 @@ mod tests {
     }
 
     #[test]
+    fn routing_covers_all_shapes() {
+        let mk = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(route(&[]), Route::Help);
+        assert_eq!(route(&mk(&["-h"])), Route::Help);
+        assert_eq!(route(&mk(&["--help"])), Route::Help);
+        assert_eq!(route(&mk(&["help"])), Route::Help);
+        assert_eq!(route(&mk(&["list"])), Route::ListXray);
+        // Escape hatch: --upstream consumes itself, forwards the rest — even bare list.
+        assert_eq!(route(&mk(&["list", "--upstream"])), Route::Forward(mk(&["list"])));
+        assert_eq!(
+            route(&mk(&["--upstream", "--json"])),
+            Route::Forward(mk(&["--json"]))
+        );
+        // Machine-readable list forwards; other verbs forward untouched.
+        assert_eq!(
+            route(&mk(&["list", "--json"])),
+            Route::Forward(mk(&["list", "--json"]))
+        );
+        assert_eq!(
+            route(&mk(&["add", "owner/repo", "--enable"])),
+            Route::Forward(mk(&["add", "owner/repo", "--enable"]))
+        );
+        assert_eq!(
+            route(&mk(&["validate", "--flag", "value with spaces"])),
+            Route::Forward(mk(&["validate", "--flag", "value with spaces"]))
+        );
+    }
+
+    #[test]
+    fn help_works_without_a_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        assert_eq!(run(&paths, &[]).unwrap(), 0);
+    }
+
+    #[test]
     fn not_bootstrapped_errors() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path().to_path_buf());
-        let err = run(&paths, &["list".to_owned()]).unwrap_err();
+        let err = run(&paths, &["add".to_owned(), "url".to_owned()]).unwrap_err();
         assert!(err.to_string().contains("not bootstrapped"), "got: {err}");
     }
 
@@ -181,7 +290,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // current → empty tempdir: no bin/omarchy inside.
         let paths = fixture(dir.path(), dir.path());
-        let err = run(&paths, &[]).unwrap_err();
+        let err = run(&paths, &["validate".to_owned()]).unwrap_err();
         assert!(
             err.to_string().contains("upstream helper missing"),
             "got: {err}"

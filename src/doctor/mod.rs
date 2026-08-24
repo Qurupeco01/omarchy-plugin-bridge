@@ -23,7 +23,8 @@ pub fn live_bus_processes() -> Option<Vec<String>> {
     Some(conflicts::parse_processes(&out))
 }
 
-pub fn report() -> Report {    let qs_out = if which_ok("quickshell") { probe("quickshell", &["--version"]) } else { None };
+pub fn report() -> Report {
+    let qs_out = if which_ok("quickshell") { probe("quickshell", &["--version"]) } else { None };
     let hyprctl = which_ok("hyprctl");
     let mut checks = vec![
         bins::check_quickshell(qs_out.as_deref()),
@@ -34,10 +35,10 @@ pub fn report() -> Report {    let qs_out = if which_ok("quickshell") { probe("q
         env::check_desktop(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()),
     ];
     // Enabled components come from `~/.config/omarchy/shell.json`, written by
-    // bootstrap and edited by select (Phase 3). No file → nothing is enabled
-    // (pre-bootstrap doctor is tier 1 only). The all-off file enables exactly
-    // the bar, so the conflict scan reduces to the `omarchy.bar` INFO row until
-    // components are selected on in Phase 3.
+    // bootstrap and thereafter by upstream only (D13). No file → nothing is
+    // enabled (pre-bootstrap doctor is tier 1 only). The all-off file enables
+    // exactly the bar, so the conflict scan reduces to the `omarchy.bar` INFO
+    // row until components are activated via `opb plugin enable`.
     let paths = crate::paths::Paths::from_env();
     if paths.shell_json().exists() {
         let raw = std::fs::read_to_string(paths.shell_json())

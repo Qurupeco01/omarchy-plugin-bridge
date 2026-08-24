@@ -8,8 +8,7 @@ mod hypr;
 mod paths;
 mod pin;
 mod plugin;
-mod select;
-mod selection;
+mod plugin_list;
 mod shell;
 mod shelljson;
 
@@ -45,14 +44,13 @@ enum Command {
     Up,
     /// Stop the shell
     Down,
-    /// Manage plugins — the single mutation path (passthrough to upstream)
+    /// Manage plugins — acquire/activate/inspect; the single mutation path
+    /// (passthrough to upstream, D13)
     Plugin {
         /// Arguments forwarded verbatim, e.g. `opb plugin add owner/repo`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Show plugin/component state with conflict info (read-only)
-    Select,
     /// Update the upstream pin
     Update,
     /// Delegate to upstream theme scripts
@@ -122,20 +120,6 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(exit::FAIL)),
                 Err(e) => {
                     eprintln!("opb plugin: {e:#}");
-                    ExitCode::from(exit::FAIL)
-                }
-            }
-        }
-        Command::Select => {
-            let paths = paths::Paths::from_env();
-            let processes = doctor::live_bus_processes().unwrap_or_default();
-            match select::list_rows(&paths, &processes) {
-                Ok(rows) => {
-                    print!("{}", select::render_rows(&rows));
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("opb select: {e:#}");
                     ExitCode::from(exit::FAIL)
                 }
             }

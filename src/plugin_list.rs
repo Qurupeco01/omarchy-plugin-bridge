@@ -1,13 +1,14 @@
-//! `opb select` — the read-only x-ray over plugin/component state (D13:
-//! mutations belong to upstream alone, via `opb plugin enable/disable`).
+//! Bare `opb plugin list` — the read-only x-ray over plugin/component state
+//! (D13: mutations belong to upstream alone, via `opb plugin enable/disable`).
 //! Rows = manifests × shell.json storage rules × live §10 conflicts.
+//! Intercepted because upstream's list is IPC-only (dead headless) and shows
+//! no conflicts; `--json` and every other arg vector forward verbatim.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::paths::Paths;
 use crate::pin;
-use crate::selection;
 use crate::shelljson;
 
 fn scan_all(paths: &Paths) -> Result<Vec<Scanned>> {
@@ -46,7 +47,44 @@ pub fn load_doc(paths: &Paths) -> Result<Value> {
     serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
-/// One `select list` row — display only, no validation logic (§5.2).
+// --- storage rules, read-only (CONCEPT §3.4) -------------------------------
+
+/// First-party namespace is reserved upstream (§3.1), so the prefix alone
+/// decides which storage rule applies.
+pub fn is_first_party(id: &str) -> bool {
+    // `omarchy.` with the dot: "omarchish" etc. don't match.
+    id.starts_with("omarchy.")
+}
+
+/// Is `id` listed in `disabledPlugins[]`?
+fn is_listed_disabled(doc: &Value, id: &str) -> bool {
+    doc.get("disabledPlugins")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(id)))
+}
+
+/// Does `id` appear in any bar layout section?
+fn is_placed_in_layout(doc: &Value, id: &str) -> bool {
+    doc.get("bar")
+        .and_then(|bar| bar.get("layout"))
+        .and_then(|l| l.as_object())
+        .is_some_and(|layout| {
+            layout.values().any(|v| {
+                v.as_array().is_some_and(|a| a.iter().any(|e| e.as_str() == Some(id)))
+            })
+        })
+}
+
+/// Does `id` appear in `plugins[]`?
+fn is_in_plugins(doc: &Value, id: &str) -> bool {
+    doc.get("plugins")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(id)))
+}
+
+// --- x-ray ------------------------------------------------------------------
+
+/// One list row — display only, no validation logic (§5.2).
 pub struct Row {
     pub id: String,
     pub origin: &'static str,
@@ -61,19 +99,19 @@ pub fn state_of(doc: &Value, kinds: &[String], id: &str) -> &'static str {
     if kinds.iter().any(|k| k == "bar") {
         return "bar";
     }
-    let placed = selection::is_placed_in_layout(doc, id);
+    let placed = is_placed_in_layout(doc, id);
     // Upstream widget semantics (PluginRegistry: isEnabled ≠ "sits in the
     // bar"): a widget renders iff it occupies a layout slot.
     if kinds.iter().any(|k| k == "bar-widget") {
         return if placed { "on" } else { "off" };
     }
-    if selection::is_first_party(id) {
-        if selection::is_listed_disabled(doc, id) {
+    if is_first_party(id) {
+        if is_listed_disabled(doc, id) {
             "off"
         } else {
             "on"
         }
-    } else if placed || selection::is_in_plugins(doc, id) {
+    } else if placed || is_in_plugins(doc, id) {
         "on"
     } else {
         "off"
@@ -194,7 +232,7 @@ pub fn render_rows(rows: &[Row]) -> String {
 mod tests {
     use super::*;
 
-    /// Fake install: current → pin with two first-party plugins; one user plugin.
+    /// Fake install: current → pin with first-party plugins; one user plugin.
     fn fixture() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let pin = dir.path().join("pin");
@@ -369,5 +407,12 @@ mod tests {
         let out = render_rows(&warned);
         assert!(out.contains("CONFLICT"), "got: {out}");
         assert!(out.lines().nth(1).unwrap().ends_with("mako owns the notifications bus name"));
+    }
+
+    #[test]
+    fn first_party_detection_is_namespace_exact() {
+        assert!(is_first_party("omarchy.lock"));
+        assert!(!is_first_party("third.party"));
+        assert!(!is_first_party("omarchish")); // prefix must be the full segment
     }
 }
