@@ -143,6 +143,19 @@ pub fn report(paths: &Paths) -> Report {
         checks.push(CheckResult::info("shell process", "not running"));
     }
 
+    // Session persistence is its own consent switch (D15) — report, never judge.
+    if paths.opb_lua().exists() {
+        checks.push(CheckResult::pass_info(
+            "session wiring",
+            "enabled (autostarts with Hyprland)",
+        ));
+    } else {
+        checks.push(CheckResult::info(
+            "session wiring",
+            "disabled — `opb enable` to autostart",
+        ));
+    }
+
     // Network last so local answers render even when offline.
     checks.push(channel_check(
         &lock.reference,
@@ -189,7 +202,6 @@ mod tests {
     use crate::pin::PreviousPin;
     use crate::shelljson;
     use std::fs;
-    use std::path::PathBuf;
 
     fn find<'a>(report: &'a Report, name: &str) -> Option<&'a CheckResult> {
         report.0.iter().find(|c| c.name == name)

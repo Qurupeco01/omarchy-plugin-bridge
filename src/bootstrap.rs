@@ -1,16 +1,15 @@
-//! `opb bootstrap` — clone + pin upstream, wire shell.json (C3).
+//! `opb bootstrap` — clone + pin upstream, generate shell.json.
 //!
-//! Never moves an existing pin: that is Phase 4's `opb update`. Re-running
-//! reports the current pin; `--redo` regenerates generated artifacts
-//! (shell.json today, opb.conf in C4) against the existing pin without
-//! re-cloning.
+//! Never moves an existing pin: that is `opb update`. Re-running reports the
+//! current pin; `--redo` regenerates shell.json against the existing pin
+//! without re-cloning. Bootstrap writes **no** Hyprland wiring (D15) —
+//! session integration is opt-in via `opb enable`.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::atomic;
 use crate::git;
-use crate::hypr;
 use crate::paths::Paths;
 use crate::pin::{self, short, PinLock};
 use crate::shelljson;
@@ -71,16 +70,7 @@ pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
             &paths.shell_json(),
             shelljson::render(&shelljson::generate(&ids)).as_bytes(),
         )?;
-        hypr::wire(paths, &pin_dir, true)?;
-        println!("opb bootstrap: pinned {reference} at {commit}");
-        println!("  pin:  {}", pin_dir.display());
-        println!("  link: {} -> current", paths.current_dir().display());
-        println!("  config: {}", paths.shell_json().display());
-        println!("  hypr:  {}", paths.opb_conf().display());
-        println!(
-            "  add to Hyprland: {}",
-            hypr::source_line(paths)
-        );
+        hyprless_success_message(paths, &reference, &commit);
         Ok(())
     })();
     if result.is_err() {
@@ -93,8 +83,8 @@ pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
 }
 
 /// The active pin: prefer the lock file, else derive from the `current` link
-/// (covers a lock-less but linked state).
-fn current_pin(paths: &Paths) -> Result<Option<(String, PathBuf)>> {
+/// (covers a lock-less but linked state). Shared with `opb enable/disable`.
+pub(crate) fn current_pin(paths: &Paths) -> Result<Option<(String, PathBuf)>> {
     if let Some(lock) = PinLock::load(paths)? {
         return Ok(Some((lock.commit.clone(), paths.pin_dir(&lock.commit))));
     }
@@ -114,7 +104,8 @@ fn current_pin(paths: &Paths) -> Result<Option<(String, PathBuf)>> {
     }
 }
 
-/// `--redo`: regenerate generated artifacts against the existing pin.
+/// `--redo`: regenerate shell.json against the existing pin. opb.lua, when
+/// installed, is refreshed by `opb enable` (idempotent) — not here.
 fn regenerate(paths: &Paths, commit: &str, pin_dir: &Path) -> Result<()> {
     ensure_pin_usable(pin_dir, commit)?;
     let ids = shelljson::first_party_non_bar_ids(&pin_dir.join("shell/plugins"))?;
@@ -122,14 +113,22 @@ fn regenerate(paths: &Paths, commit: &str, pin_dir: &Path) -> Result<()> {
         &paths.shell_json(),
         shelljson::render(&shelljson::generate(&ids)).as_bytes(),
     )?;
-    // Redo must rewrite opb.conf even though the user sources it now.
-    hypr::wire(paths, pin_dir, false)?;
     println!(
-        "opb bootstrap: regenerated shell.json + opb.conf against {} ({})",
+        "opb bootstrap: regenerated shell.json against {} ({})",
         short(commit),
         pin_dir.display()
     );
     Ok(())
+}
+
+/// Bootstrap output: pin facts + the opt-in session-integration hint.
+fn hyprless_success_message(paths: &Paths, reference: &str, commit: &str) {
+    println!("opb bootstrap: pinned {reference} at {commit}");
+    println!("  pin:  {}", paths.pin_dir(commit).display());
+    println!("  link: {} -> current", paths.current_dir().display());
+    println!("  config: {}", paths.shell_json().display());
+    println!("  start the shell now:      opb up");
+    println!("  autostart it per session: opb enable");
 }
 
 /// A pin is only usable if it carries the shell plugin tree — anything else
@@ -163,7 +162,7 @@ mod tests {
     fn fake_pin(home: &std::path::Path) -> (String, PathBuf) {
         let commit = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
         let paths = Paths::new(home.to_path_buf());
-        let pin_dir = paths.pin_dir(&commit);
+        let pin_dir = paths.pin_dir(commit);
         fs::create_dir_all(&pin_dir).unwrap();
         std::fs::write(pin_dir.join("version"), "4.0.0.alpha\n").unwrap();
         let plugins = pin_dir.join("shell/plugins");

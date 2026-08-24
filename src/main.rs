@@ -40,8 +40,13 @@ struct Cli {
 enum Command {
     /// Check dependencies and conflicts on this machine
     Doctor,
-    /// Clone and pin upstream omarchy, generate shell.json, wire Hyprland
+    /// Clone and pin upstream omarchy, generate shell.json
     Bootstrap(BootstrapArgs),
+    /// Install session wiring: autostart the shell each Hyprland start
+    /// (idempotent; activate with require("opb") in your Hyprland Lua config)
+    Enable,
+    /// Remove the session wiring (keybinds in keys.lua stay yours)
+    Disable,
     /// Launch the pinned shell
     Up,
     /// Stop the shell
@@ -98,6 +103,41 @@ fn not_implemented(cmd: &str) -> ! {
     std::process::exit(i32::from(exit::ERROR));
 }
 
+/// `opb enable` — install/regenerate the managed opb.lua against the active
+/// pin (D15). Never edits the user's hyprland.lua; prints the require line.
+fn enable(paths: &paths::Paths) -> anyhow::Result<()> {
+    let Some((commit, pin_dir)) = bootstrap::current_pin(paths)? else {
+        anyhow::bail!("not bootstrapped yet — run `opb bootstrap` first");
+    };
+    let report = hypr::enable(paths, &pin_dir)?;
+    println!("opb enable: session wiring installed for pin @ {}", commit);
+    if report.legacy_conf_removed {
+        println!("  removed stale managed opb.conf (hyprlang era)");
+    }
+    if report.needs_require_line {
+        println!("  activate by adding this line to your Hyprland Lua config:");
+        println!("    {}", hypr::require_hint());
+    } else {
+        println!("  already activated via require(\"opb\") in your Hyprland config");
+    }
+    Ok(())
+}
+
+/// `opb disable` — remove the managed wiring. keys.lua and the user's own
+/// config lines are untouched (D15).
+fn disable(paths: &paths::Paths) -> anyhow::Result<()> {
+    if hypr::disable(paths)? {
+        println!(
+            "opb disable: removed {}",
+            paths.opb_lua().display()
+        );
+    } else {
+        println!("opb disable: no session wiring installed");
+    }
+    println!("  remove the require(\"opb\") line from your Hyprland Lua config, if present");
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -116,6 +156,26 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb bootstrap: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
+        Command::Enable => {
+            let paths = paths::Paths::from_env();
+            match enable(&paths) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("opb enable: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
+        Command::Disable => {
+            let paths = paths::Paths::from_env();
+            match disable(&paths) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("opb disable: {e:#}");
                     ExitCode::from(exit::FAIL)
                 }
             }

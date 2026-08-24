@@ -12,7 +12,7 @@
 //! Pure (env reads happen in `from_env` only) — fully unit-testable by
 //! injecting roots.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// First-party plugin namespace is reserved upstream; the pin dir is the
 /// only place opb keeps upstream code.
@@ -56,10 +56,6 @@ impl Paths {
             data_root,
             config_root,
         }
-    }
-
-    pub fn home(&self) -> &Path {
-        &self.home
     }
 
     /// opb-owned state root (XDG-aware): `…/opb`.
@@ -107,8 +103,29 @@ impl Paths {
         self.config_root.join("hypr")
     }
 
-    /// `…/hypr/opb.conf` — the managed Hyprland block (D8).
-    pub fn opb_conf(&self) -> PathBuf {
+    /// `…/hypr/opb.lua` — the managed Hyprland Lua wiring (D8, opt-in D15).
+    pub fn opb_lua(&self) -> PathBuf {
+        self.hypr_config_dir().join("opb.lua")
+    }
+
+    /// The user's hyprland.lua — its presence marks a Lua-config Hyprland,
+    /// which is what our wiring requires.
+    pub fn hyprland_lua(&self) -> PathBuf {
+        self.hypr_config_dir().join("hyprland.lua")
+    }
+
+    /// `…/opb` under the XDG config root — holds the user-owned keys file.
+    pub fn opb_config_dir(&self) -> PathBuf {
+        self.config_root.join("opb")
+    }
+
+    /// `~/.config/opb/keys.lua` — user-authoritative keybinds (D11).
+    pub fn keys_lua(&self) -> PathBuf {
+        self.opb_config_dir().join("keys.lua")
+    }
+
+    /// Legacy managed block from the hyprlang era; removed when found.
+    pub fn legacy_opb_conf(&self) -> PathBuf {
         self.hypr_config_dir().join("opb.conf")
     }
 }
@@ -161,9 +178,10 @@ mod tests {
             p.hypr_config_dir(),
             PathBuf::from("/home/test/.config/hypr")
         );
+        assert_eq!(p.opb_lua(), PathBuf::from("/home/test/.config/hypr/opb.lua"));
         assert_eq!(
-            p.opb_conf(),
-            PathBuf::from("/home/test/.config/hypr/opb.conf")
+            p.keys_lua(),
+            PathBuf::from("/home/test/.config/opb/keys.lua")
         );
     }
 
@@ -189,8 +207,8 @@ mod tests {
         let Some(home) = std::env::var_os("HOME") else {
             return;
         };
+        let _ = home;
         let p = Paths::from_env();
-        assert_eq!(p.home(), Path::new(&home));
         // With XDG unset these are the fallbacks; asserting them only checks
         // the crate wiring, not the values themselves.
         assert!(p.opb_state_dir().ends_with("opb"));
