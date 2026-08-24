@@ -134,8 +134,9 @@ fn regenerate(paths: &Paths, commit: &str, pin_dir: &Path) -> Result<()> {
 
 /// A pin is only usable if it carries the shell plugin tree — anything else
 /// means the ref resolved to a non-omarchy commit (or the dir was mangled) —
-/// and clears the quattro support floor (CONCEPT §8).
-fn ensure_pin_usable(pin_dir: &Path, commit: &str) -> Result<()> {
+/// and clears the quattro support floor (CONCEPT §8). Shared with `opb update`'s
+/// pre-flip clone validation.
+pub(crate) fn ensure_pin_usable(pin_dir: &Path, commit: &str) -> Result<()> {
     let plugins = pin_dir.join("shell/plugins");
     if !plugins.is_dir() {
         bail!(

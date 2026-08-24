@@ -11,8 +11,6 @@ mod plugin;
 mod plugin_list;
 mod shell;
 mod shelljson;
-// Planning core lands in C2; CLI wiring follows in C4.
-#[allow(dead_code)]
 mod update;
 
 use clap::{Args, Parser, Subcommand};
@@ -54,8 +52,9 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Update the upstream pin
-    Update,
+    /// Update the upstream pin (preview → confirm → flip, with down-window
+    /// shell.json reconciliation)
+    Update(UpdateArgs),
     /// Delegate to upstream theme scripts
     Theme,
 }
@@ -68,6 +67,19 @@ struct BootstrapArgs {
     /// Regenerate generated artifacts against the existing pin (no re-clone)
     #[arg(long)]
     redo: bool,
+}
+
+#[derive(Args)]
+struct UpdateArgs {
+    /// Target ref to pin (a release tag); defaults to the newest tag
+    #[arg(long = "ref", value_name = "REF")]
+    reference: Option<String>,
+    /// First-party id renamed upstream, as OLD=NEW (repeatable)
+    #[arg(long = "rename", value_name = "OLD=NEW")]
+    renames: Vec<String>,
+    /// Skip the confirmation prompt
+    #[arg(long)]
+    yes: bool,
 }
 
 fn not_implemented(cmd: &str) -> ! {
@@ -127,7 +139,33 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Update => not_implemented("update"),
+        Command::Update(args) => {
+            let paths = paths::Paths::from_env();
+            let renames = match args
+                .renames
+                .iter()
+                .map(|r| update::parse_rename(r))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("opb update: {e:#}");
+                    return ExitCode::from(exit::FAIL);
+                }
+            };
+            let opts = update::UpdateOptions {
+                reference: args.reference,
+                renames,
+                yes: args.yes,
+            };
+            match update::run(&paths, &opts) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("opb update: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
         Command::Theme => not_implemented("theme"),
     }
 }

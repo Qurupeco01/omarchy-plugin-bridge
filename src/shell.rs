@@ -20,6 +20,15 @@ pub fn shell_dir(paths: &Paths) -> Result<PathBuf> {
     Ok(pin::active_dir(paths)?.join("shell"))
 }
 
+/// Whether any shell process for the current pin is running. Used by
+/// `opb update` to decide whether the down-window needs a `down`/`up` pair.
+pub fn is_running(paths: &Paths) -> bool {
+    match shell_dir(paths) {
+        Ok(dir) => !shell_pids(&dir).unwrap_or_default().is_empty(),
+        Err(_) => false,
+    }
+}
+
 /// pgrep pattern for the shell process. The launched cmdline is exactly
 /// `quickshell -p <shell_dir>`; the ipc pinger is `quickshell ipc … -p …` and
 /// does not contain the contiguous `quickshell -p` prefix. The path is escaped
