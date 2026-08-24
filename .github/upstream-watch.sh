@@ -9,6 +9,7 @@
 #   bin/omarchy-plugin-*                plugin CLI surface (opb help mirrors it)
 #   migrations/*  touching shell.json   storage-rule migrations (-G match)
 #   themes/                             theme engine surface
+#   default/hypr/bindings/*.lua         keybind catalog source (opb keys)
 #
 # Exit 0 = clean; exit 1 = contract drift detected (report printed);
 # exit 2 = infrastructure error (no network, no tag, ...).
@@ -64,6 +65,8 @@ append_log "plugin CLI surface (bin/omarchy-plugin-*):" \
 append_log "storage-rule migrations (migrations/* mentioning shell.json):" \
   -G'shell\.json' migrations/
 append_log "theme surface (themes/):" themes/
+append_log "keybind catalog source (default/hypr/bindings/*.lua):" \
+  "default/hypr/bindings/"
 
 if [ -n "$(echo "$report" | tail -n +3)" ]; then
   report+=$'HUMAN REVIEW REQUIRED before bumping the supported pin (CONCEPT §6 playbook).\n'

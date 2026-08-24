@@ -11,7 +11,7 @@ use crate::paths::Paths;
 use crate::pin;
 use crate::shelljson;
 
-fn scan_all(paths: &Paths) -> Result<Vec<Scanned>> {
+pub(crate) fn scan_all(paths: &Paths) -> Result<Vec<Scanned>> {
     let mut out = Vec::new();
     if let Ok(pin_dir) = pin::active_dir(paths) {
         out.extend(

@@ -25,6 +25,8 @@ mod exit {
     pub const ERROR: u8 = 2;
 }
 
+mod keys;
+
 #[derive(Parser)]
 #[command(
     name = "opb",
@@ -54,6 +56,11 @@ enum Command {
     Down,
     /// Snapshot of pin state, generations, and channel distance
     Status,
+    /// Manage keybinds for shell/plugin actions (zero binds by default, D11)
+    Keys {
+        #[command(subcommand)]
+        command: KeysCommand,
+    },
     /// Manage plugins — acquire/activate/inspect; the single mutation path
     /// (passthrough to upstream, D13)
     Plugin {
@@ -107,6 +114,20 @@ struct UpdateArgs {
 enum UpdateCommand {
     /// Flip back to the previous pin generation
     Rollback,
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    /// List bindable actions × enabled-state (enabled plugins only unless
+    /// --all; narrow with --plugin)
+    List {
+        /// Include disabled components' actions
+        #[arg(long)]
+        all: bool,
+        /// Only actions for this component id
+        #[arg(long = "plugin", value_name = "ID")]
+        plugin: Option<String>,
+    },
 }
 
 fn not_implemented(cmd: &str) -> ! {
@@ -266,6 +287,21 @@ fn main() -> ExitCode {
             let report = status::report(&paths);
             print!("{}", report.render());
             ExitCode::from(report.exit_code())
+        }
+        Command::Keys { command } => {
+            let paths = paths::Paths::from_env();
+            match command {
+                KeysCommand::List { all, plugin } => match keys::catalog(&paths) {
+                    Ok(entries) => {
+                        print!("{}", keys::render(&entries, all, plugin.as_deref()));
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("opb keys list: {e:#}");
+                        ExitCode::from(exit::FAIL)
+                    }
+                },
+            }
         }
         Command::Update(args) => {
             let paths = paths::Paths::from_env();
