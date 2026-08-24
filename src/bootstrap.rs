@@ -12,7 +12,7 @@ use crate::atomic;
 use crate::git;
 use crate::hypr;
 use crate::paths::Paths;
-use crate::pin::PinLock;
+use crate::pin::{self, PinLock};
 use crate::shelljson;
 
 pub struct BootstrapOptions {
@@ -133,17 +133,18 @@ fn regenerate(paths: &Paths, commit: &str, pin_dir: &Path) -> Result<()> {
 }
 
 /// A pin is only usable if it carries the shell plugin tree — anything else
-/// means the ref resolved to a non-omarchy commit (or the dir was mangled).
+/// means the ref resolved to a non-omarchy commit (or the dir was mangled) —
+/// and clears the quattro support floor (CONCEPT §8).
 fn ensure_pin_usable(pin_dir: &Path, commit: &str) -> Result<()> {
     let plugins = pin_dir.join("shell/plugins");
     if !plugins.is_dir() {
         bail!(
-            "pin {} has no shell/plugins dir — not an omarchy checkout; \
-             delete the pin and bootstrap again",
-            commit
+            "pin {commit} has no shell/plugins dir — not an omarchy checkout; \
+             delete the pin and bootstrap again"
         );
     }
-    Ok(())
+    pin::ensure_supported_tree(pin_dir)
+        .with_context(|| format!("pin {commit} rejected"))
 }
 
 fn short(commit: &str) -> String {
@@ -160,11 +161,13 @@ mod tests {
     }
 
     /// Bootstrap a fake pin inside `home`'s layout: pin dir, `current` link,
-    /// lock, and a minimal plugins tree.
+    /// lock, and a minimal plugins tree (version file clears the floor).
     fn fake_pin(home: &std::path::Path) -> (String, PathBuf) {
         let commit = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
         let paths = Paths::new(home.to_path_buf());
-        let pin_dir = paths.pin_dir(commit);
+        let pin_dir = paths.pin_dir(&commit);
+        fs::create_dir_all(&pin_dir).unwrap();
+        std::fs::write(pin_dir.join("version"), "4.0.0.alpha\n").unwrap();
         let plugins = pin_dir.join("shell/plugins");
         fs::create_dir_all(plugins.join("bar")).unwrap();
         fs::write(

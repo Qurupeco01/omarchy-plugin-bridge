@@ -92,6 +92,67 @@ fn parse_latest_tag(output: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no semver release tags found at {REMOTE}"))
 }
 
+/// Run `git -C <dir> <args>`, returning trimmed stdout. Bails with stderr on
+/// failure. Shared plumbing for the read-only inspection commands below.
+fn exec(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .with_context(|| format!("spawn git {}", args.first().unwrap_or(&"?")))?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Init an empty repo — scratch space for comparing two remote refs.
+pub fn init(dir: &Path) -> Result<()> {
+    exec(dir, &["init", "--quiet"]).map(|_| ())
+}
+
+/// Register `origin` in a scratch repo.
+pub fn remote_add(dir: &Path, url: &str) -> Result<()> {
+    exec(dir, &["remote", "add", "origin", url]).map(|_| ())
+}
+
+/// Fetch the named refs (tags or branches) from `origin` into a scratch repo.
+pub fn fetch(dir: &Path, refs: &[&str]) -> Result<()> {
+    let mut args: Vec<&str> = vec!["fetch", "--quiet", "origin"];
+    args.extend(refs.iter().copied());
+    exec(dir, &args).map(|_| ())
+}
+
+/// Read one file out of a fetched ref (`git show <rev>:<path>`).
+pub fn show_file(dir: &Path, rev: &str, path: &str) -> Result<String> {
+    exec(dir, &["show", &format!("{rev}:{path}")])
+}
+
+/// Scoped commit list between two refs, e.g. commits touching only `shell/`
+/// and `bin/`. One `sha subject` string per entry.
+pub fn log_oneline(dir: &Path, range: &str, paths: &[&str]) -> Result<Vec<String>> {
+    let mut args: Vec<&str> = vec!["log", "--oneline", range, "--"];
+    args.extend(paths);
+    let out = exec(dir, &args)?;
+    Ok(if out.is_empty() {
+        Vec::new()
+    } else {
+        out.lines().map(str::to_owned).collect()
+    })
+}
+
+/// Scoped diffstat summary between two refs.
+pub fn diff_stat(dir: &Path, range: &str, paths: &[&str]) -> Result<String> {
+    let mut args: Vec<&str> = vec!["diff", "--stat", range, "--"];
+    args.extend(paths);
+    exec(dir, &args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

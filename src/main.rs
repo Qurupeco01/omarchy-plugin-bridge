@@ -11,6 +11,9 @@ mod plugin;
 mod plugin_list;
 mod shell;
 mod shelljson;
+// Planning core lands in C2; CLI wiring follows in C4.
+#[allow(dead_code)]
+mod update;
 
 use clap::{Args, Parser, Subcommand};
 use std::process::ExitCode;
