@@ -63,8 +63,7 @@ fn shell_pids(shell_dir: &Path) -> Result<Vec<u32>> {
 /// IPC liveness probe. The only reliable signal is exit 0 AND output `ok`:
 /// a config-path error exits 0 with a different message, a missing instance
 /// exits 255.
-fn ping_ok(shell_dir: &Path) -> bool {
-    let out = Command::new("timeout")
+fn ping_ok(shell_dir: &Path) -> bool {    let out = Command::new("timeout")
         .args(["--kill-after=1s", "2s", "quickshell", "ipc", "-p"])
         .arg(shell_dir)
         .args(["call", "shell", "ping"])
@@ -73,32 +72,6 @@ fn ping_ok(shell_dir: &Path) -> bool {
         out,
         Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "ok"
     )
-}
-
-/// Reload the running shell's config via IPC. Returns `Ok(false)` when the
-/// shell is not alive; `Ok(true)` when a reload was delivered. IPC exit codes
-/// are unreliable (session findings), so a non-ok reload is reported as a
-/// warning string rather than an error.
-pub fn reload_if_running(paths: &Paths) -> Result<Option<String>> {
-    let shell_dir = shell_dir(paths)?;
-    if !ping_ok(&shell_dir) {
-        return Ok(None);
-    }
-    let out = Command::new("quickshell")
-        .args(["ipc", "-p"])
-        .arg(&shell_dir)
-        .args(["call", "shell", "reloadConfig"])
-        .output()
-        .context("spawn quickshell ipc reloadConfig")?;
-    // Exit codes are unreliable (session findings), but a clean reload on a
-    // live shell exits 0; anything else gets surfaced as a soft warning.
-    if !out.status.success() {
-        return Ok(Some(format!(
-            "reloadConfig exited {}",
-            out.status.code().unwrap_or(-1)
-        )));
-    }
-    Ok(Some(String::new()))
 }
 
 /// Launch the shell detached and wait until it answers IPC ping.

@@ -1,6 +1,10 @@
 //! Surgical `shell.json` edits — the storage rules of CONCEPT §3.4 as pure
 //! functions over a parsed document.
-#![allow(dead_code)] // wired into `opb select` in the next commit
+//!
+//! D13: runtime enable/disable belongs to upstream (IPC via `opb plugin`);
+//! this module is dormant library kept for phase 4's pin-bump selection
+//! reconciliation, where offline file surgery is unavoidable.
+#![allow(dead_code)] // phase 4 reconciliation groundwork
 //!
 //! Storage rules implemented:
 //! - first-party (`omarchy.*`) non-bar: enabled unless listed in
@@ -129,6 +133,25 @@ pub fn disable(doc: &mut Value, id: &str) -> Result<Outcome> {
         }));
     }
     Ok(into_outcome(changed, "was not enabled"))
+}
+
+/// Read-only: is `id` listed in `disabledPlugins[]`?
+pub fn is_listed_disabled(doc: &Value, id: &str) -> bool {
+    doc.get("disabledPlugins")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| array_contains(a, id))
+}
+
+/// Read-only: does `id` appear in any bar layout section?
+pub fn is_placed_in_layout(doc: &Value, id: &str) -> bool {
+    find_in_layout(doc, id).is_some()
+}
+
+/// Read-only: does `id` appear in `plugins[]`?
+pub fn is_in_plugins(doc: &Value, id: &str) -> bool {
+    doc.get("plugins")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| array_contains(a, id))
 }
 
 fn into_outcome(changed: bool, unchanged_note: &'static str) -> Outcome {

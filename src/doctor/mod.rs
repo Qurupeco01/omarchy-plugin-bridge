@@ -1,9 +1,9 @@
 //! `opb doctor` — assembles tier-1 checks (CONCEPT §10) into a report.
 
 mod bins;
-mod conflicts;
+pub(crate) mod conflicts;
 mod env;
-mod shellcfg;
+pub(crate) mod shellcfg;
 mod version;
 
 use crate::check::Report;
@@ -16,8 +16,14 @@ fn probe(bin: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub fn report() -> Report {
-    let qs_out = if which_ok("quickshell") { probe("quickshell", &["--version"]) } else { None };
+/// Live session-bus process names, deduplicated. `None` = busctl unavailable
+/// or no session bus (callers decide how to degrade).
+pub fn live_bus_processes() -> Option<Vec<String>> {
+    let out = probe("busctl", &["--user", "list", "--no-pager"])?;
+    Some(conflicts::parse_processes(&out))
+}
+
+pub fn report() -> Report {    let qs_out = if which_ok("quickshell") { probe("quickshell", &["--version"]) } else { None };
     let hyprctl = which_ok("hyprctl");
     let mut checks = vec![
         bins::check_quickshell(qs_out.as_deref()),

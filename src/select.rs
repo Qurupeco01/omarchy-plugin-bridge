@@ -1,59 +1,44 @@
-//! `opb select enable/disable <id>` — applies the selection model (CONCEPT
-//! §4) by surgically editing the generated `shell.json`, then reloads a
-//! running shell via IPC. Ids are resolved read-only against pin + user
-//! manifests; the edit itself is pure (`selection`) and lands atomically.
+//! `opb select` — the read-only x-ray over plugin/component state (D13:
+//! mutations belong to upstream alone, via `opb plugin enable/disable`).
+//! Rows = manifests × shell.json storage rules × live §10 conflicts.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::atomic;
 use crate::paths::Paths;
 use crate::pin;
-use crate::selection::{self, Outcome, PluginKind, Section};
+use crate::selection;
 use crate::shelljson;
 
-/// One select operation.
-#[derive(Debug, Clone)]
-pub enum Action {
-    Enable { id: String, section: Section },
-    Disable { id: String },
-}
-
-/// Resolve an id against pin + user manifests → how it renders.
-/// First-party ids come from `<pin>/shell/plugins/**`, user plugins from
-/// `$HOME/.config/omarchy/plugins/**` (D5: same dir a real Omarchy uses).
-pub fn resolve_kind(paths: &Paths, id: &str) -> Result<PluginKind> {
-    let manifests = scan_all(paths)?;
-    match manifests.iter().find(|m| m.id == id) {
-        Some(m) => Ok(if m.kinds.iter().any(|k| k == "bar-widget") {
-            PluginKind::BarWidget
-        } else {
-            PluginKind::Regular
-        }),
-        None => bail!(
-            "unknown plugin id '{id}' — not in the pinned tree or ~/.config/omarchy/plugins \
-             (see available ids with `opb select list`)"
-        ),
-    }
-}
-
-fn scan_all(paths: &Paths) -> Result<Vec<shelljson::ManifestInfo>> {
+fn scan_all(paths: &Paths) -> Result<Vec<Scanned>> {
     let mut out = Vec::new();
     if let Ok(pin_dir) = pin::active_dir(paths) {
-        out.extend(shelljson::scan_manifests(&pin_dir.join("shell/plugins"))?);
+        out.extend(
+            shelljson::scan_manifests(&pin_dir.join("shell/plugins"))?
+                .into_iter()
+                .map(|info| Scanned { info, origin: "first-party" }),
+        );
     }
     let user = user_plugins_dir(paths);
-    out.extend(shelljson::scan_manifests(&user)?);
+    out.extend(
+        shelljson::scan_manifests(&user)?
+            .into_iter()
+            .map(|info| Scanned { info, origin: "user" }),
+    );
     Ok(out)
+}
+
+/// A manifest plus where it was found.
+pub struct Scanned {
+    pub info: shelljson::ManifestInfo,
+    pub origin: &'static str,
 }
 
 fn user_plugins_dir(paths: &Paths) -> std::path::PathBuf {
     paths.omarchy_config_dir().join("plugins")
 }
 
-/// Load + parse shell.json. Missing file is a hard error: without it we would
-/// be editing a file the shell never wrote (D6: our generated file is the
-/// authoritative starting point).
+/// Load + parse shell.json.
 pub fn load_doc(paths: &Paths) -> Result<Value> {
     let path = paths.shell_json();
     let raw = std::fs::read_to_string(&path)
@@ -61,51 +46,153 @@ pub fn load_doc(paths: &Paths) -> Result<Value> {
     serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
-/// Apply an action to shell.json (no IPC). Returns the outcome plus whether
-/// anything was written.
-pub fn apply(paths: &Paths, action: &Action) -> Result<Outcome> {
-    match action {
-        Action::Enable { id, section } => {
-            let kind = resolve_kind(paths, id)?;
-            let mut doc = load_doc(paths)?;
-            let outcome = selection::enable(&mut doc, id, kind, *section)?;
-            write_if_changed(paths, &doc, &outcome)?;
-            Ok(outcome)
+/// One `select list` row — display only, no validation logic (§5.2).
+pub struct Row {
+    pub id: String,
+    pub origin: &'static str,
+    pub kind: String,
+    pub state: &'static str,
+    pub conflict: Option<String>,
+}
+
+/// Pure: enabled/disabled state — storage rules for services/panels,
+/// upstream widget semantics (layout membership) for bar-widgets.
+pub fn state_of(doc: &Value, kinds: &[String], id: &str) -> &'static str {
+    if kinds.iter().any(|k| k == "bar") {
+        return "bar";
+    }
+    let placed = selection::is_placed_in_layout(doc, id);
+    // Upstream widget semantics (PluginRegistry: isEnabled ≠ "sits in the
+    // bar"): a widget renders iff it occupies a layout slot.
+    if kinds.iter().any(|k| k == "bar-widget") {
+        return if placed { "on" } else { "off" };
+    }
+    if selection::is_first_party(id) {
+        if selection::is_listed_disabled(doc, id) {
+            "off"
+        } else {
+            "on"
         }
-        Action::Disable { id } => {
-            // The bar is refused before manifest resolution so disabling it
-            // works even though its manifest kind is `bar`.
-            let mut doc = load_doc(paths)?;
-            let outcome = selection::disable(&mut doc, id)?;
-            write_if_changed(paths, &doc, &outcome)?;
-            Ok(outcome)
-        }
+    } else if placed || selection::is_in_plugins(doc, id) {
+        "on"
+    } else {
+        "off"
     }
 }
 
-fn write_if_changed(paths: &Paths, doc: &Value, outcome: &Outcome) -> Result<()> {
-    if !outcome.changed() {
-        return Ok(());
-    }
-    atomic::write(&paths.shell_json(), shelljson::render(doc).as_bytes())
-        .context("write shell.json")
+/// Assemble display rows from manifests × shell.json × live bus state.
+pub fn list_rows(paths: &Paths, processes: &[String]) -> Result<Vec<Row>> {
+    let doc = load_doc(paths)?;
+    let scanned = scan_all(paths)?;
+    // Conflict scan is gated on enabled matrix components (§10), same as doctor.
+    let enabled = crate::doctor::shellcfg::enabled_components(&doc);
+    let refs: Vec<&str> = enabled.iter().map(String::as_str).collect();
+    let conflicts = crate::doctor::conflicts::scan(processes, &refs);
+
+    let mut rows: Vec<Row> = scanned
+        .into_iter()
+        .map(|s| {
+            let state = state_of(&doc, &s.info.kinds, &s.info.id);
+            let conflict = conflicts
+                .iter()
+                .find(|c| c.name == s.info.id)
+                .map(|c| match &c.status {
+                    crate::check::Status::Warn(d) | crate::check::Status::Info(d) => {
+                        d.clone()
+                    }
+                    _ => String::new(),
+                })
+                .filter(|d| !d.is_empty());
+            Row {
+                id: s.info.id.clone(),
+                origin: s.origin,
+                kind: if s.info.kinds.is_empty() {
+                    "-".to_owned()
+                } else {
+                    s.info.kinds.join(",")
+                },
+                state,
+                conflict,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(rows)
 }
 
-/// Plugins roots for display purposes (`select list`, C4).
-#[allow(dead_code)] // consumed by `opb select list` in the next commit
-pub fn plugins_roots(paths: &Paths) -> Vec<std::path::PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(pin_dir) = pin::active_dir(paths) {
-        roots.push(pin_dir.join("shell/plugins"));
+/// Aligned plain-text table; conflict column only present when any row has one.
+pub fn render_rows(rows: &[Row]) -> String {
+    let show_conflict = rows.iter().any(|r| r.conflict.is_some());
+    let w_state = rows.iter().map(|r| r.state.len()).max().unwrap_or(3).max(5);
+    let w_id = rows.iter().map(|r| r.id.len()).max().unwrap_or(2).max(2);
+    let w_origin = rows
+        .iter()
+        .map(|r| r.origin.len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let w_kind = rows.iter().map(|r| r.kind.len()).max().unwrap_or(4).max(4);
+
+    let header = if show_conflict {
+        format!(
+            "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {:<w_kind$}  CONFLICT\n",
+            "STATE",
+            "ID",
+            "ORIGIN",
+            "KIND",
+            w_state = w_state,
+            w_id = w_id,
+            w_origin = w_origin,
+            w_kind = w_kind,
+        )
+    } else {
+        format!(
+            "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {}\n",
+            "STATE",
+            "ID",
+            "ORIGIN",
+            "KIND",
+            w_state = w_state,
+            w_id = w_id,
+            w_origin = w_origin,
+        )
+    };
+    let mut out = header;
+    for r in rows {
+        let line = if show_conflict {
+            format!(
+                "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {:<w_kind$}  {}\n",
+                r.state,
+                r.id,
+                r.origin,
+                r.kind,
+                r.conflict.as_deref().unwrap_or(""),
+                w_state = w_state,
+                w_id = w_id,
+                w_origin = w_origin,
+                w_kind = w_kind,
+            )
+        } else {
+            format!(
+                "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {}\n",
+                r.state,
+                r.id,
+                r.origin,
+                r.kind,
+                w_state = w_state,
+                w_id = w_id,
+                w_origin = w_origin,
+            )
+        };
+        out.push_str(line.trim_end());
+        out.push('\n');
     }
-    roots.push(user_plugins_dir(paths));
-    roots
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::selection::BAR_ID;
 
     /// Fake install: current → pin with two first-party plugins; one user plugin.
     fn fixture() -> (tempfile::TempDir, Paths) {
@@ -136,6 +223,23 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        for (sub, id) in [
+            ("notifications", "omarchy.notifications"),
+            ("polkit", "omarchy.polkit"),
+        ] {
+            let d = pin.join("shell/plugins/services").join(sub);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("manifest.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schemaVersion": 1,
+                    "id": id,
+                    "kinds": ["service"]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
         let user = dir.path().join("home/.config/omarchy/plugins/cool.panel");
         std::fs::create_dir_all(&user).unwrap();
         let m = serde_json::json!({ "schemaVersion": 1, "id": "cool.panel", "kinds": ["panel"] });
@@ -160,31 +264,7 @@ mod tests {
             )
             .unwrap(),
         );
-        atomic::write(&paths.shell_json(), shelljson::render(&doc).as_bytes()).unwrap();
-    }
-
-    #[test]
-    fn resolves_widget_and_regular_kinds() {
-        let (_d, paths) = fixture();
-        assert_eq!(
-            resolve_kind(&paths, "omarchy.clock").unwrap(),
-            PluginKind::BarWidget
-        );
-        assert_eq!(
-            resolve_kind(&paths, "omarchy.idle").unwrap(),
-            PluginKind::Regular
-        );
-        assert_eq!(
-            resolve_kind(&paths, "cool.panel").unwrap(),
-            PluginKind::Regular
-        );
-    }
-
-    #[test]
-    fn unknown_id_lists_where_to_look() {
-        let (_d, paths) = fixture();
-        let err = resolve_kind(&paths, "ghost").unwrap_err();
-        assert!(err.to_string().contains("unknown plugin id"), "got: {err}");
+        std::fs::write(paths.shell_json(), shelljson::render(&doc)).unwrap();
     }
 
     #[test]
@@ -195,83 +275,99 @@ mod tests {
     }
 
     #[test]
-    fn enable_writes_file_disable_restores_it_byte_identical() {
-        let (_d, paths) = fixture();
-        seed_shell_json(&paths);
-        let original = std::fs::read_to_string(paths.shell_json()).unwrap();
+    fn states_follow_storage_rules() {
+        let mut doc = all_off();
+        // First-party off (listed), third-party off (absent).
+        assert_eq!(state_of(&doc, &["bar-widget".into()], "omarchy.clock"), "off");
+        assert_eq!(state_of(&doc, &["panel".into()], "cool.panel"), "off");
+        // Widget semantics: layout membership is the whole truth — even
+        // unlisted (upstream's disable leaves it that way), absent from the
+        // bar means off.
+        doc["disabledPlugins"] = serde_json::json!(["omarchy.idle"]);
+        assert_eq!(state_of(&doc, &["bar-widget".into()], "omarchy.clock"), "off");
+        doc["bar"]["layout"]["left"] = serde_json::json!(["omarchy.clock"]);
+        assert_eq!(state_of(&doc, &["bar-widget".into()], "omarchy.clock"), "on");
+        // Third-party on via plugins[].
+        assert_eq!(state_of(&doc, &["panel".into()], "cool.panel"), "off");
+        doc["plugins"] = serde_json::json!(["cool.panel"]);
+        assert_eq!(state_of(&doc, &["panel".into()], "cool.panel"), "on");
+        // Bar kind is always active regardless of everything else.
+        assert_eq!(state_of(&doc, &["bar".into()], "omarchy.bar"), "bar");
+    }
 
-        let out = apply(
-            &paths,
-            &Action::Enable {
-                id: "omarchy.clock".to_owned(),
-                section: Section::Center,
-            },
-        )
-        .unwrap();
-        assert!(out.changed());
-        let edited = std::fs::read_to_string(paths.shell_json()).unwrap();
-        assert!(edited.contains("\"center\": ["), "got: {edited}");
-        let doc: Value = serde_json::from_str(&edited).unwrap();
-        assert_eq!(doc["bar"]["layout"]["center"][0], "omarchy.clock");
-        assert_ne!(edited, original);
-
-        let out = apply(&paths, &Action::Disable { id: "omarchy.clock".to_owned() }).unwrap();
-        assert!(out.changed());
-        assert_eq!(std::fs::read_to_string(paths.shell_json()).unwrap(), original);
+    fn all_off() -> serde_json::Value {
+        serde_json::from_value(crate::shelljson::generate(&[
+            "omarchy.clock".to_owned(),
+            "omarchy.notifications".to_owned(),
+            "omarchy.polkit".to_owned(),
+        ]))
+        .unwrap()
     }
 
     #[test]
-    fn unchanged_outcome_skips_the_write() {
+    fn list_rows_reflect_doc_and_gate_conflicts_on_enabled_set() {
         let (_d, paths) = fixture();
         seed_shell_json(&paths);
-        let enable = || {
-            apply(
-                &paths,
-                &Action::Enable {
-                    id: "omarchy.clock".to_owned(),
-                    section: Section::Center,
-                },
-            )
-            .unwrap()
-        };
-        assert!(enable().changed());
-        let after = std::fs::read_to_string(paths.shell_json()).unwrap();
-        // Second identical enable: no change, file untouched.
-        assert!(!enable().changed());
-        assert_eq!(std::fs::read_to_string(paths.shell_json()).unwrap(), after);
-    }
+        // All-off: no conflicts even with every colliding daemon live.
+        let procs = vec!["mako".to_owned(), "hyprpolkitagent".to_owned(), "waybar".to_owned()];
+        let rows = list_rows(&paths, &procs).unwrap();
+        let clock = rows.iter().find(|r| r.id == "omarchy.clock").unwrap();
+        assert_eq!((clock.state, clock.origin), ("off", "first-party"));
+        assert!(clock.conflict.is_none());
+        let panel = rows.iter().find(|r| r.id == "cool.panel").unwrap();
+        assert_eq!(panel.origin, "user");
 
-    #[test]
-    fn bar_disable_refused_before_any_write() {
-        let (_d, paths) = fixture();
-        seed_shell_json(&paths);
-        let err = apply(&paths, &Action::Disable { id: BAR_ID.to_owned() }).unwrap_err();
-        assert!(err.to_string().contains("cannot be disabled"), "got: {err}");
-    }
-
-    #[test]
-    fn third_party_enable_lands_in_plugins_array() {
-        let (_d, paths) = fixture();
-        seed_shell_json(&paths);
-        apply(
-            &paths,
-            &Action::Enable {
-                id: "cool.panel".to_owned(),
-                section: Section::Right,
-            },
-        )
-        .unwrap();
-        let doc: Value =
+        // Enable notifications the way the shell would: delist from
+        // disabledPlugins[] (D13: upstream is the writer; we simulate its write).
+        let mut doc: Value =
             serde_json::from_str(&std::fs::read_to_string(paths.shell_json()).unwrap()).unwrap();
-        assert_eq!(doc["plugins"][0], "cool.panel");
+        doc["disabledPlugins"] = serde_json::json!(
+            doc["disabledPlugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|v| v.as_str() != Some("omarchy.notifications"))
+                .collect::<Vec<_>>()
+        );
+        std::fs::write(paths.shell_json(), shelljson::render(&doc)).unwrap();
+        let rows = list_rows(&paths, &procs).unwrap();
+        let notif = rows.iter().find(|r| r.id == "omarchy.notifications").unwrap();
+        assert_eq!(notif.state, "on");
+        assert!(
+            notif.conflict.as_deref().is_some_and(|c| c.contains("mako")),
+            "got: {:?}",
+            notif.conflict
+        );
+        // Polkit stays clean: agent running but component still disabled.
+        let polkit = rows.iter().find(|r| r.id == "omarchy.polkit").unwrap();
+        assert!(polkit.conflict.is_none());
     }
 
     #[test]
-    fn plugins_roots_cover_pin_and_user_dirs() {
-        let (_d, paths) = fixture();
-        let roots = plugins_roots(&paths);
-        assert_eq!(roots.len(), 2);
-        assert!(roots[0].ends_with("shell/plugins"));
-        assert!(roots[1].ends_with(".config/omarchy/plugins"));
+    fn render_aligns_and_hides_empty_conflict_column() {
+        let rows = vec![Row {
+            id: "a".to_owned(),
+            origin: "user",
+            kind: "panel".to_owned(),
+            state: "on",
+            conflict: None,
+        }];
+        let out = render_rows(&rows);
+        assert!(!out.contains("CONFLICT"), "got: {out}");
+        assert_eq!(
+            out.lines().nth(1).unwrap().split_whitespace().collect::<Vec<_>>(),
+            ["on", "a", "user", "panel"]
+        );
+
+        let warned = vec![Row {
+            id: "b".to_owned(),
+            origin: "first-party",
+            kind: "-".to_owned(),
+            state: "on",
+            conflict: Some("mako owns the notifications bus name".to_owned()),
+        }];
+        let out = render_rows(&warned);
+        assert!(out.contains("CONFLICT"), "got: {out}");
+        assert!(out.lines().nth(1).unwrap().ends_with("mako owns the notifications bus name"));
     }
 }
