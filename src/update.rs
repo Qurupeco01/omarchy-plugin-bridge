@@ -21,7 +21,7 @@ use crate::bootstrap;
 use crate::doctor;
 use crate::git;
 use crate::paths::Paths;
-use crate::pin::{self, PinLock};
+use crate::pin::{self, short, PinLock};
 use crate::shelljson;
 
 /// Paths the preview is scoped to — the contract set (RESEARCH §1 scope).
@@ -335,9 +335,6 @@ fn exit_fail() -> u8 {
     1
 }
 
-fn short(commit: &str) -> String {
-    commit.chars().take(8).collect()
-}
 
 fn confirm_msg(prompt: &str, yes: bool) -> Result<()> {
     if yes {

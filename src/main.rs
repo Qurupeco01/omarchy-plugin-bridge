@@ -11,6 +11,7 @@ mod plugin;
 mod plugin_list;
 mod shell;
 mod shelljson;
+mod status;
 mod update;
 
 use clap::{Args, Parser, Subcommand};
@@ -45,6 +46,8 @@ enum Command {
     Up,
     /// Stop the shell
     Down,
+    /// Snapshot of pin state, generations, and channel distance
+    Status,
     /// Manage plugins — acquire/activate/inspect; the single mutation path
     /// (passthrough to upstream, D13)
     Plugin {
@@ -146,6 +149,12 @@ fn main() -> ExitCode {
                     ExitCode::from(exit::FAIL)
                 }
             }
+        }
+        Command::Status => {
+            let paths = paths::Paths::from_env();
+            let report = status::report(&paths);
+            print!("{}", report.render());
+            ExitCode::from(report.exit_code())
         }
         Command::Update(args) => {
             let paths = paths::Paths::from_env();

@@ -12,7 +12,7 @@ use crate::atomic;
 use crate::git;
 use crate::hypr;
 use crate::paths::Paths;
-use crate::pin::{self, PinLock};
+use crate::pin::{self, short, PinLock};
 use crate::shelljson;
 
 pub struct BootstrapOptions {
@@ -148,9 +148,6 @@ pub(crate) fn ensure_pin_usable(pin_dir: &Path, commit: &str) -> Result<()> {
         .with_context(|| format!("pin {commit} rejected"))
 }
 
-fn short(commit: &str) -> String {
-    commit.chars().take(8).collect()
-}
 
 #[cfg(test)]
 mod tests {

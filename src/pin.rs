@@ -95,6 +95,11 @@ pub fn active_dir(paths: &Paths) -> Result<PathBuf> {
     std::fs::read_link(&current).context("read current link")
 }
 
+/// Abbreviated commit sha for display (8 chars).
+pub(crate) fn short(commit: &str) -> String {
+    commit.chars().take(8).collect()
+}
+
 /// Tolerant parse of upstream's `version` file content (observed: `4.0.0.alpha`
 /// — not valid semver): first three numeric components, `-` treated as a
 /// separator, missing components are zero. `None` when unparseable.
