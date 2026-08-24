@@ -1,0 +1,15 @@
+name: upstream-watch
+
+on:
+  schedule:
+    # daily, 05:20 UTC
+    - cron: "20 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: diff upstream main vs newest stable tag (sentinel paths)
+        run: ./.github/upstream-watch.sh
