@@ -49,7 +49,7 @@ enum Command {
     /// as a marker-managed block
     Enable(EnableArgs),
     /// Remove the session wiring (keybinds in keys.lua stay yours)
-    Disable,
+    Disable(DisableArgs),
     /// Launch the pinned shell
     Up,
     /// Stop the shell
@@ -95,6 +95,13 @@ struct EnableArgs {
     no_line: bool,
     /// Also start the shell right now (autostart otherwise applies to the
     /// next Hyprland start only — exec-once semantics never fire on reload)
+    #[arg(long)]
+    now: bool,
+}
+
+#[derive(Args)]
+struct DisableArgs {
+    /// Also stop the running shell (mirror of `enable --now`)
     #[arg(long)]
     now: bool,
 }
@@ -213,7 +220,7 @@ fn prompt_default_yes(question: &str) -> bool {
 /// any stale legacy artifacts, in an order that keeps every intermediate
 /// state re-parse-consistent. keys.lua and the rest of the user's config are
 /// untouched (D15).
-fn disable(paths: &paths::Paths) -> anyhow::Result<()> {
+fn disable(paths: &paths::Paths, args: &DisableArgs) -> anyhow::Result<()> {
     let report = hypr::disable(paths)?;
     if report.lua_removed {
         println!("opb disable: removed {}", paths.opb_lua().display());
@@ -224,6 +231,10 @@ fn disable(paths: &paths::Paths) -> anyhow::Result<()> {
         println!("  removed managed activation block from {}", paths.hyprland_lua().display());
     }
     println!("  keys.lua stays yours: {}", paths.keys_lua().display());
+    // Mirror of enable --now: unwiring also stops the running shell.
+    if args.now {
+        shell::down(paths)?;
+    }
     Ok(())
 }
 
@@ -268,9 +279,9 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Disable => {
+        Command::Disable(args) => {
             let paths = paths::Paths::from_env();
-            match disable(&paths) {
+            match disable(&paths, &args) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb disable: {e:#}");
