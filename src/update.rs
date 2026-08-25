@@ -15,6 +15,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::io::Write;
+use std::path::Path;
 
 use crate::atomic;
 use crate::bootstrap;
@@ -218,8 +219,7 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
     if was_running {
         crate::shell::down(paths)?;
     }
-    std::fs::rename(&tmp, &new_pin_dir)
-        .with_context(|| format!("move clone to {}", new_pin_dir.display()))?;
+    install_clone(&tmp, &new_pin_dir)?;
     atomic::symlink_flip(&new_pin_dir, &paths.current_dir())?;
     PinLock::stable(&plan.reference, &commit)
         .with_previous(&lock)
@@ -329,6 +329,19 @@ pub fn prune_generations(paths: &Paths) -> Result<()> {
         println!("opb update: pruned old generation {commit}");
     }
     Ok(())
+}
+
+/// Move a validated fresh clone into its final generation slot. A dir for
+/// this commit can already exist when rolling forward to the generation a
+/// previous rollback kept — it is opb-owned state for the exact commit we just
+/// re-cloned and validated, so replacing it with the fresh clone is safe.
+fn install_clone(tmp: &Path, new_pin_dir: &Path) -> Result<()> {
+    if new_pin_dir.is_dir() {
+        std::fs::remove_dir_all(new_pin_dir)
+            .with_context(|| format!("replace stale generation {}", new_pin_dir.display()))?;
+    }
+    std::fs::rename(tmp, new_pin_dir)
+        .with_context(|| format!("move clone to {}", new_pin_dir.display()))
 }
 
 fn exit_fail() -> u8 {
@@ -447,6 +460,28 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success());
+    }
+
+    #[test]
+    fn install_clone_replaces_stale_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("clone-tmp");
+        let target = dir.path().join("omarchy@abc");
+
+        // Fresh path: plain move.
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("fresh"), "x").unwrap();
+        install_clone(&tmp, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(target.join("fresh")).unwrap(), "x");
+        assert!(!tmp.exists());
+
+        // Roll-forward onto a kept generation: stale content must go.
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("fresh"), "y").unwrap();
+        std::fs::write(target.join("stale"), "old").unwrap();
+        install_clone(&tmp, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(target.join("fresh")).unwrap(), "y");
+        assert!(!target.join("stale").exists());
     }
 
     fn commit(repo: &Path, msg: &str, files: &[(&str, &str)]) {
