@@ -10,8 +10,18 @@ use anyhow::Context;
 
 const SCRATCH_PREFIXES: [&str; 2] = [".clone-tmp", ".update-tmp"];
 
+/// Full snapshot: dependency rows first (they fail closed on broken
+/// environments), then pin-state rows.
 pub fn report(paths: &Paths) -> Report {
     let mut checks: Vec<CheckResult> = crate::checks::dependency_checks().0;
+    checks.extend(state_report(paths).0);
+    Report(checks)
+}
+
+/// Pin-state rows only — no environment probes, so tests stay hermetic and
+/// the exit code reflects opb's own consistency, not the machine's.
+fn state_report(paths: &Paths) -> Report {
+    let mut checks: Vec<CheckResult> = Vec::new();
     let lock = match PinLock::load(paths) {
         Ok(Some(l)) => Some(l),
         Ok(None) => None,
@@ -259,14 +269,24 @@ mod tests {
     fn not_bootstrapped_is_info_and_exits_zero() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path().to_path_buf());
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(status_of(&r, "pin"), "Info");
         assert_eq!(r.exit_code(), 0);
-        // 6 dependency rows + the pin INFO: deps report even unbootstrapped.
-        assert_eq!(r.0.len(), 7, "deps + pin info");
+        assert_eq!(r.0.len(), 1, "only the pin INFO without a pin");
+    }
+
+    #[test]
+    fn full_report_prepends_dependency_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        let r = state_report(&paths);
+        // Dependency rows lead regardless of bootstrapping; names are stable
+        // even where the binaries are missing (CI).
         for name in ["quickshell", "hyprctl", "git", "bash", "WAYLAND_DISPLAY"] {
             assert!(r.0.iter().any(|c| c.name == name), "missing dep row {name}");
         }
+        // The pin-state INFO trails the dependency block.
+        assert!(r.0.last().is_some_and(|c| c.name == "pin"));
     }
 
     #[test]
@@ -279,7 +299,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(r.exit_code(), 0, "{:#?}", r);
         for name in ["pin", "current link", "pin dir", "generations", "scratch", "shell.json"] {
             assert_eq!(status_of(&r, name), "Pass", "{name}");
@@ -300,7 +320,7 @@ mod tests {
         // Flip the link by hand behind opb's back.
         atomic::symlink_flip(&paths.pin_dir("aaa"), &paths.current_dir()).unwrap();
 
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(r.exit_code(), 1);
         assert_eq!(status_of(&r, "current link"), "Fail");
     }
@@ -312,7 +332,7 @@ mod tests {
         // Lock records a commit whose dir was never created.
         PinLock::stable("v4.0.0", "ghost").save(&paths).unwrap();
 
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(r.exit_code(), 1);
         assert_eq!(status_of(&r, "pin dir"), "Fail");
     }
@@ -327,7 +347,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(status_of(&r, "scratch"), "Warn");
         assert_eq!(r.exit_code(), 0, "stale scratch is a warning, not a failure");
     }
@@ -337,14 +357,14 @@ mod tests {
         let (_d, paths) = fixture(&["aaa"], ("v4.0.0", "aaa"), None);
 
         // Missing → WARN only.
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(status_of(&r, "shell.json"), "Warn");
         assert_eq!(r.exit_code(), 0);
 
         // Present but garbage → FAIL.
         fs::create_dir_all(paths.omarchy_config_dir()).unwrap();
         fs::write(paths.shell_json(), "not json").unwrap();
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(status_of(&r, "shell.json"), "Fail");
         assert_eq!(r.exit_code(), 1);
     }
@@ -353,7 +373,7 @@ mod tests {
     fn more_than_two_generations_warn() {
         let (_d, paths) = fixture(&["aaa", "bbb", "ccc"], ("v4.2.0", "ccc"), None);
 
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(status_of(&r, "generations"), "Warn");
         assert_eq!(r.exit_code(), 0);
     }
@@ -362,7 +382,7 @@ mod tests {
     fn lock_records_previous_whose_dir_is_gone() {
         let (_d, paths) = fixture(&["bbb"], ("v4.1.0", "bbb"), Some(("v4.0.0", "aaa")));
 
-        let r = report(&paths);
+        let r = state_report(&paths);
         assert_eq!(status_of(&r, "previous generation"), "Warn");
     }
 }
