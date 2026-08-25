@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-`opb`: thin Rust CLI that runs upstream [omarchy-shell](https://github.com/basecamp/omarchy) (Quickshell QML) on a raw Arch + Hyprland system, pinned to an upstream ref. Bridge-only: bootstrap/pin/env/wiring/conflicts/select/update. Never re-implements Omarchy.
+`opb`: thin Rust CLI that runs upstream [omarchy-shell](https://github.com/basecamp/omarchy) (Quickshell QML) on a raw Arch + Hyprland system, pinned to an upstream ref. Bridge-only: bootstrap/pin/env/wiring/update/keys/plugins. Never re-implements Omarchy.
 
 **Prime directive — minimal invasiveness**: nothing on the user's machine changes unless explicitly selected. Measure every change against this.
 
@@ -10,14 +10,15 @@
 
 ```
 src/        Rust crate
-design/     Product docs - follow for any implementations
 ```
+
+Product docs live in the owner's vault (`~/Core/02_Projects/omarchy-plugin-bridge/`: CONCEPT/ROADMAP/RESEARCH/TODO; curated decisions in `~/Core/01_Notes/omarchy-plugin-bridge/opb-decisions.md`). The repo itself stays doc-light: README is the only user-facing document.
 
 ## Code organization
 
 Follow good Rust practices and keep the code well organized — small modules with a clear purpose, split when something earns its own home rather than by upfront doctrine:
 
-- Keep decision logic (shell.json rules, conflict matching, pin math) separate from side effects (subprocesses, fs) wherever natural — pure functions are trivial to test
+- Keep decision logic (shell.json rules, pin math, catalog parsing) separate from side effects (subprocesses, fs) wherever natural — pure functions are trivial to test
 - Effects stay thin: subprocess/fs helpers do one thing, return `Result`, never panic
 - Errors via `anyhow` with context at boundaries
 - No async/tokio (D3) — fully sync
