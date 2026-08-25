@@ -96,6 +96,9 @@ pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
             // Spell the tree through `current`: quickshell IPC matches
             // instances by exact config path, and upstream's own helpers
             // derive theirs from OMARCHY_PATH (see shell::shell_dir).
+            if !paths.current_dir().is_symlink() {
+                bail!("not bootstrapped — run `opb bootstrap` first");
+            }
             let pin_dir = paths.current_dir();
             let omarchy = pin_dir.join("bin/omarchy");
             if !omarchy.is_file() {
