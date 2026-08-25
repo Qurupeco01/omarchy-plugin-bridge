@@ -149,6 +149,17 @@ enum KeysCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Bulk-import upstream's suggested binds (arrow-key selection; nothing
+    /// written without explicit consent)
+    ImportSuggested {
+        /// Only candidates for this component id
+        #[arg(long = "plugin", value_name = "ID")]
+        plugin: Option<String>,
+        /// Accept all free combos non-interactively (occupied ones are
+        /// skipped, never shadowed)
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn not_implemented(cmd: &str) -> ! {
@@ -343,6 +354,15 @@ fn main() -> ExitCode {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(e) => {
                             eprintln!("opb keys set: {e:#}");
+                            ExitCode::from(exit::FAIL)
+                        }
+                    }
+                }
+                KeysCommand::ImportSuggested { plugin, yes } => {
+                    match keys::import_suggested(&paths, plugin.as_deref(), yes) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(e) => {
+                            eprintln!("opb keys import-suggested: {e:#}");
                             ExitCode::from(exit::FAIL)
                         }
                     }
