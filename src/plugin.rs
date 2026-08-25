@@ -8,17 +8,17 @@
 //!   verbatim help leaks branding and hides our additions; drift is guarded
 //!   by the CI sentinel on `bin/omarchy-plugin-*`)
 //! - bare `list` → the read-only x-ray (`plugin_list`) — upstream's list is
-//!   IPC-only and shows no conflicts; ours works headless
+//!   IPC-only; ours works headless
 //! - args containing `--upstream` → flag consumed, rest forwarded verbatim
 //!   (raw upstream view; skips all opb additions by design)
-//! - everything else → forwarded verbatim, plus a §10 conflict pre-flight on
-//!   `enable <id>` (`--yes` skips; consumed only there)
+//! - everything else → forwarded verbatim (conflicts between desktop apps
+//!   are out of scope, ADR-0008); `add` gets a gum pre-flight so a missing
+//!   `gum` refuses up front instead of dying mid-clone
 //!
 //! stdio is inherited so interactive flows and warnings surface verbatim;
 //! upstream's exit code propagates (signal death → 1).
 
 use anyhow::{bail, Context, Result};
-use std::io::BufRead;
 use std::process::Command;
 
 use crate::env;
@@ -87,8 +87,7 @@ pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         Route::ListXray => {
-            let processes = crate::doctor::live_bus_processes().unwrap_or_default();
-            let rows = crate::plugin_list::list_rows(paths, &processes)?;
+            let rows = crate::plugin_list::list_rows(paths)?;
             print!("{}", crate::plugin_list::render_rows(&rows));
             Ok(0)
         }
@@ -105,21 +104,6 @@ pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
                 bail!("upstream helper missing: {}", omarchy.display());
             }
 
-            // Conflict pre-flight: only for toggles, and only enable can create
-            // a collision (§10 matrix rows are about running alternatives).
-            let forward = match extract_toggle(&forward) {
-                Some((verb, id, rest)) => {
-                    let (consent, mut rest) = take_consent(&rest);
-                    if verb == "enable" && !consent && !confirm_enable(paths, &id)? {
-                        println!("opb plugin: aborted");
-                        return Ok(1);
-                    }
-                    let mut rebuilt = vec![verb, id];
-                    rebuilt.append(&mut rest);
-                    rebuilt
-                }
-                None => forward,
-            };
             if forward.first().map(String::as_str) == Some("add") {
                 gum_guard(&forward)?;
             }
@@ -183,96 +167,6 @@ fn gum_block_reason(forward: &[String], gum_installed: bool) -> Option<String> {
     Some(format!(
         "upstream's add flow needs `gum` for its interactive prompts \
          (not installed) — install it (`sudo pacman -S gum`) or {hint}"
-    ))
-}
-
-/// Peel `"enable"|"disable" <id>` off the front of the forwarded args.
-/// Flags before the id (-h, --help) mean there is no toggle to pre-flight.
-pub fn extract_toggle(args: &[String]) -> Option<(String, String, Vec<String>)> {
-    let mut iter = args.iter();
-    let verb = iter.next()?;
-    if verb != "enable" && verb != "disable" {
-        return None;
-    }
-    let id = iter.next()?;
-    if id.starts_with('-') || id.is_empty() {
-        return None; // help flags / missing id: forward verbatim, upstream explains
-    }
-    Some((verb.clone(), id.clone(), args[2..].to_vec()))
-}
-
-/// Consume an opb-level `-y/--yes` (first occurrence) from the remaining args.
-/// Returns (consent, args-without-it).
-pub fn take_consent(args: &[String]) -> (bool, Vec<String>) {
-    let mut consent = false;
-    let mut out = Vec::with_capacity(args.len());
-    for a in args {
-        if !consent && (a == "--yes" || a == "-y") {
-            consent = true;
-            continue;
-        }
-        out.push(a.clone());
-    }
-    (consent, out)
-}
-
-/// §10 pre-flight for `enable <id>`: true = proceed, false = abort.
-/// Unknown ids / missing shell.json / no bus → forward silently (upstream
-/// owns error reporting); only *detected collisions for this very component*
-/// trigger a prompt. Bar-style INFO rows never block (coexistence is fine).
-pub fn confirm_enable(paths: &Paths, id: &str) -> Result<bool> {
-    let Some(doc) = maybe_doc(paths)? else {
-        return Ok(true);
-    };
-    let mut enabled = crate::doctor::shellcfg::enabled_components(&doc);
-    if !enabled.iter().any(|c| c == id) {
-        enabled.push(id.to_owned());
-    }
-    let Some(processes) = crate::doctor::live_bus_processes() else {
-        return Ok(true); // no busctl: nothing detected, nothing to ask about
-    };
-    let refs: Vec<&str> = enabled.iter().map(String::as_str).collect();
-    let hits = collisions_for(&crate::doctor::conflicts::scan(&processes, &refs), id);
-    if hits.is_empty() {
-        return Ok(true);
-    }
-    println!("opb plugin: enabling {id} collides with:");
-    for h in &hits {
-        println!("  - {h}");
-    }
-    print!("Proceed anyway? [y/N] ");
-    use std::io::Write;
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).ok();
-    Ok(matches!(
-        line.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
-}
-
-/// Pure: warning-level conflicts for this exact component — other rows
-/// (pre-existing states, INFO bar coexistence) never block.
-fn collisions_for(results: &[crate::check::CheckResult], id: &str) -> Vec<String> {
-    results
-        .iter()
-        .filter(|c| c.name == id)
-        .filter_map(|c| match &c.status {
-            crate::check::Status::Warn(d) => Some(d.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn maybe_doc(paths: &Paths) -> Result<Option<serde_json::Value>> {
-    let path = paths.shell_json();
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
-    Ok(Some(
-        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?,
     ))
 }
 
@@ -375,48 +269,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(code, 7);
-    }
-
-    #[test]
-    fn toggle_extraction() {
-        let mk = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
-        let (verb, id, rest) =
-            extract_toggle(&mk(&["enable", "omarchy.clock", "--section", "center"])).unwrap();
-        assert_eq!((verb.as_str(), id.as_str()), ("enable", "omarchy.clock"));
-        assert_eq!(rest, mk(&["--section", "center"]));
-        assert!(extract_toggle(&mk(&["disable", "x"])).is_some());
-        assert!(extract_toggle(&mk(&["list"])).is_none());
-        assert!(extract_toggle(&mk(&["enable", "--help"])).is_none());
-        assert!(extract_toggle(&mk(&["enable"])).is_none());
-        assert!(extract_toggle(&mk(&["add", "url"])).is_none());
-    }
-
-    #[test]
-    fn consent_taken_once_and_only_leading_flag() {
-        let mk = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
-        let (yes, rest) = take_consent(&mk(&["--yes", "--section", "left"]));
-        assert!(yes);
-        assert_eq!(rest, mk(&["--section", "left"]));
-        let (no, rest) = take_consent(&mk(&["--section", "left"]));
-        assert!(!no);
-        assert_eq!(rest.len(), 2);
-        let (yes, rest) = take_consent(&mk(&["-y"]));
-        assert!(yes);
-        assert!(rest.is_empty());
-    }
-
-    #[test]
-    fn collisions_filter_targets_only_the_enabled_component() {
-        use crate::check::CheckResult;
-        let results = vec![
-            CheckResult::warn("omarchy.notifications", "mako owns the notifications bus name"),
-            CheckResult::info("omarchy.bar", "another bar is running: waybar"),
-            CheckResult::warn("omarchy.polkit", "hyprpolkitagent is a polkit auth agent"),
-        ];
-        let hits = collisions_for(&results, "omarchy.notifications");
-        assert_eq!(hits, ["mako owns the notifications bus name"]);
-        // INFO rows never block their own component either.
-        assert!(collisions_for(&results, "omarchy.bar").is_empty());
     }
 
     #[test]

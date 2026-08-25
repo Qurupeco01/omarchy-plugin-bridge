@@ -1,6 +1,6 @@
-//! `opb status` — read-only snapshot of pin state, generations, consistency,
-//! and distance from the channel head. Reuses the doctor's check framework:
-//! same rendering, same exit-code convention (0 = no FAIL rows).
+//! `opb status` — read-only snapshot of dependencies, pin state, generations,
+//! and distance from the channel head. One check framework, one rendering,
+//! one exit-code convention (0 = no FAIL rows).
 
 use crate::check::{CheckResult, Report};
 use crate::git;
@@ -11,7 +11,7 @@ use anyhow::Context;
 const SCRATCH_PREFIXES: [&str; 2] = [".clone-tmp", ".update-tmp"];
 
 pub fn report(paths: &Paths) -> Report {
-    let mut checks: Vec<CheckResult> = Vec::new();
+    let mut checks: Vec<CheckResult> = crate::checks::dependency_checks().0;
     let lock = match PinLock::load(paths) {
         Ok(Some(l)) => Some(l),
         Ok(None) => None,
@@ -262,7 +262,11 @@ mod tests {
         let r = report(&paths);
         assert_eq!(status_of(&r, "pin"), "Info");
         assert_eq!(r.exit_code(), 0);
-        assert_eq!(r.0.len(), 1, "no dependent checks without a pin");
+        // 6 dependency rows + the pin INFO: deps report even unbootstrapped.
+        assert_eq!(r.0.len(), 7, "deps + pin info");
+        for name in ["quickshell", "hyprctl", "git", "bash", "WAYLAND_DISPLAY"] {
+            assert!(r.0.iter().any(|c| c.name == name), "missing dep row {name}");
+        }
     }
 
     #[test]

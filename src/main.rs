@@ -1,7 +1,7 @@
 mod atomic;
 mod bootstrap;
 mod check;
-mod doctor;
+mod checks;
 mod env;
 mod git;
 mod hypr;
@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand};
 use std::process::ExitCode;
 
 mod exit {
-    #![allow(dead_code)] // ERROR consumed by stubs; OK/FAIL by doctor/report
+    #![allow(dead_code)] // ERROR consumed by stubs; OK/FAIL by report exits
 
     pub const OK: u8 = 0;
     pub const FAIL: u8 = 1;
@@ -40,8 +40,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check dependencies and conflicts on this machine
-    Doctor,
     /// Clone and pin upstream omarchy, generate shell.json
     Bootstrap(BootstrapArgs),
     /// Install session wiring: autostart the shell each Hyprland start
@@ -54,7 +52,7 @@ enum Command {
     Up,
     /// Stop the shell
     Down,
-    /// Snapshot of pin state, generations, and channel distance
+    /// Snapshot of dependencies, pin state, generations, and channel distance
     Status,
     /// Manage keybinds for shell/plugin actions (zero binds by default, D11)
     Keys {
@@ -252,11 +250,6 @@ fn disable(paths: &paths::Paths, args: &DisableArgs) -> anyhow::Result<()> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Doctor => {
-            let report = doctor::report();
-            print!("{}", report.render());
-            ExitCode::from(report.exit_code())
-        }
         Command::Bootstrap(args) => {
             let paths = paths::Paths::from_env();
             let opts = bootstrap::BootstrapOptions {

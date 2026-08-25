@@ -1,8 +1,8 @@
 //! Bare `opb plugin list` — the read-only x-ray over plugin/component state
 //! (D13: mutations belong to upstream alone, via `opb plugin enable/disable`).
-//! Rows = manifests × shell.json storage rules × live §10 conflicts.
-//! Intercepted because upstream's list is IPC-only (dead headless) and shows
-//! no conflicts; `--json` and every other arg vector forward verbatim.
+//! Rows = manifests × shell.json storage rules. Intercepted because upstream's
+//! list is IPC-only (dead headless); `--json` and every other arg vector
+//! forward verbatim.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -90,7 +90,6 @@ pub struct Row {
     pub origin: &'static str,
     pub kind: String,
     pub state: &'static str,
-    pub conflict: Option<String>,
 }
 
 /// Pure: enabled/disabled state — storage rules for services/panels,
@@ -118,29 +117,15 @@ pub fn state_of(doc: &Value, kinds: &[String], id: &str) -> &'static str {
     }
 }
 
-/// Assemble display rows from manifests × shell.json × live bus state.
-pub fn list_rows(paths: &Paths, processes: &[String]) -> Result<Vec<Row>> {
+/// Assemble display rows from manifests × shell.json.
+pub fn list_rows(paths: &Paths) -> Result<Vec<Row>> {
     let doc = load_doc(paths)?;
     let scanned = scan_all(paths)?;
-    // Conflict scan is gated on enabled matrix components (§10), same as doctor.
-    let enabled = crate::doctor::shellcfg::enabled_components(&doc);
-    let refs: Vec<&str> = enabled.iter().map(String::as_str).collect();
-    let conflicts = crate::doctor::conflicts::scan(processes, &refs);
 
     let mut rows: Vec<Row> = scanned
         .into_iter()
         .map(|s| {
             let state = state_of(&doc, &s.info.kinds, &s.info.id);
-            let conflict = conflicts
-                .iter()
-                .find(|c| c.name == s.info.id)
-                .map(|c| match &c.status {
-                    crate::check::Status::Warn(d) | crate::check::Status::Info(d) => {
-                        d.clone()
-                    }
-                    _ => String::new(),
-                })
-                .filter(|d| !d.is_empty());
             Row {
                 id: s.info.id.clone(),
                 origin: s.origin,
@@ -150,7 +135,6 @@ pub fn list_rows(paths: &Paths, processes: &[String]) -> Result<Vec<Row>> {
                     s.info.kinds.join(",")
                 },
                 state,
-                conflict,
             }
         })
         .collect();
@@ -158,9 +142,8 @@ pub fn list_rows(paths: &Paths, processes: &[String]) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
-/// Aligned plain-text table; conflict column only present when any row has one.
+/// Aligned plain-text table.
 pub fn render_rows(rows: &[Row]) -> String {
-    let show_conflict = rows.iter().any(|r| r.conflict.is_some());
     let w_state = rows.iter().map(|r| r.state.len()).max().unwrap_or(3).max(5);
     let w_id = rows.iter().map(|r| r.id.len()).max().unwrap_or(2).max(2);
     let w_origin = rows
@@ -169,59 +152,28 @@ pub fn render_rows(rows: &[Row]) -> String {
         .max()
         .unwrap_or(6)
         .max(6);
-    let w_kind = rows.iter().map(|r| r.kind.len()).max().unwrap_or(4).max(4);
 
-    let header = if show_conflict {
-        format!(
-            "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {:<w_kind$}  CONFLICT\n",
-            "STATE",
-            "ID",
-            "ORIGIN",
-            "KIND",
-            w_state = w_state,
-            w_id = w_id,
-            w_origin = w_origin,
-            w_kind = w_kind,
-        )
-    } else {
-        format!(
-            "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {}\n",
-            "STATE",
-            "ID",
-            "ORIGIN",
-            "KIND",
-            w_state = w_state,
-            w_id = w_id,
-            w_origin = w_origin,
-        )
-    };
-    let mut out = header;
+    let mut out = format!(
+        "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {}\n",
+        "STATE",
+        "ID",
+        "ORIGIN",
+        "KIND",
+        w_state = w_state,
+        w_id = w_id,
+        w_origin = w_origin,
+    );
     for r in rows {
-        let line = if show_conflict {
-            format!(
-                "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {:<w_kind$}  {}\n",
-                r.state,
-                r.id,
-                r.origin,
-                r.kind,
-                r.conflict.as_deref().unwrap_or(""),
-                w_state = w_state,
-                w_id = w_id,
-                w_origin = w_origin,
-                w_kind = w_kind,
-            )
-        } else {
-            format!(
-                "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {}\n",
-                r.state,
-                r.id,
-                r.origin,
-                r.kind,
-                w_state = w_state,
-                w_id = w_id,
-                w_origin = w_origin,
-            )
-        };
+        let line = format!(
+            "{:<w_state$}  {:<w_id$}  {:<w_origin$}  {}\n",
+            r.state,
+            r.id,
+            r.origin,
+            r.kind,
+            w_state = w_state,
+            w_id = w_id,
+            w_origin = w_origin,
+        );
         out.push_str(line.trim_end());
         out.push('\n');
     }
@@ -343,15 +295,12 @@ mod tests {
     }
 
     #[test]
-    fn list_rows_reflect_doc_and_gate_conflicts_on_enabled_set() {
+    fn list_rows_reflect_doc() {
         let (_d, paths) = fixture();
         seed_shell_json(&paths);
-        // All-off: no conflicts even with every colliding daemon live.
-        let procs = vec!["mako".to_owned(), "hyprpolkitagent".to_owned(), "waybar".to_owned()];
-        let rows = list_rows(&paths, &procs).unwrap();
+        let rows = list_rows(&paths).unwrap();
         let clock = rows.iter().find(|r| r.id == "omarchy.clock").unwrap();
         assert_eq!((clock.state, clock.origin), ("off", "first-party"));
-        assert!(clock.conflict.is_none());
         let panel = rows.iter().find(|r| r.id == "cool.panel").unwrap();
         assert_eq!(panel.origin, "user");
 
@@ -368,45 +317,24 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         std::fs::write(paths.shell_json(), shelljson::render(&doc)).unwrap();
-        let rows = list_rows(&paths, &procs).unwrap();
+        let rows = list_rows(&paths).unwrap();
         let notif = rows.iter().find(|r| r.id == "omarchy.notifications").unwrap();
         assert_eq!(notif.state, "on");
-        assert!(
-            notif.conflict.as_deref().is_some_and(|c| c.contains("mako")),
-            "got: {:?}",
-            notif.conflict
-        );
-        // Polkit stays clean: agent running but component still disabled.
-        let polkit = rows.iter().find(|r| r.id == "omarchy.polkit").unwrap();
-        assert!(polkit.conflict.is_none());
     }
 
     #[test]
-    fn render_aligns_and_hides_empty_conflict_column() {
+    fn render_aligns_columns() {
         let rows = vec![Row {
             id: "a".to_owned(),
             origin: "user",
             kind: "panel".to_owned(),
             state: "on",
-            conflict: None,
         }];
         let out = render_rows(&rows);
-        assert!(!out.contains("CONFLICT"), "got: {out}");
         assert_eq!(
             out.lines().nth(1).unwrap().split_whitespace().collect::<Vec<_>>(),
             ["on", "a", "user", "panel"]
         );
-
-        let warned = vec![Row {
-            id: "b".to_owned(),
-            origin: "first-party",
-            kind: "-".to_owned(),
-            state: "on",
-            conflict: Some("mako owns the notifications bus name".to_owned()),
-        }];
-        let out = render_rows(&warned);
-        assert!(out.contains("CONFLICT"), "got: {out}");
-        assert!(out.lines().nth(1).unwrap().ends_with("mako owns the notifications bus name"));
     }
 
     #[test]

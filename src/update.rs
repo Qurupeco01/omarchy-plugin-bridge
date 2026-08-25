@@ -19,7 +19,6 @@ use std::path::Path;
 
 use crate::atomic;
 use crate::bootstrap;
-use crate::doctor;
 use crate::git;
 use crate::paths::Paths;
 use crate::pin::{self, short, PinLock};
@@ -170,7 +169,7 @@ pub fn parse_rename(arg: &str) -> Result<(String, String)> {
 }
 
 /// Execute the update flow end-to-end (CONCEPT §6):
-/// preview → confirm → validated fresh clone → doctor re-run → down-window
+/// preview → confirm → validated fresh clone → dependency re-run → down-window
 /// (down → flip + lock save → shell.json reconciliation → up; restart only
 /// happens when the shell was running before). The old pin dir stays on disk
 /// for rollback (C5 prunes generations).
@@ -186,12 +185,12 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
     let old_pin_dir = pin::active_dir(paths)?;
     let old_ids = shelljson::first_party_non_bar_ids(&old_pin_dir.join("shell/plugins"))?;
 
-    // Doctor re-run gates the flip: a FAIL must stop the update before the
-    // pin moves (WARN/INFO are fine).
-    let report = doctor::report();
+    // Dependency re-run gates the flip: a FAIL must stop the update before
+    // the pin moves.
+    let report = crate::checks::dependency_checks();
     print!("{}", report.render());
     if report.exit_code() >= exit_fail() {
-        bail!("doctor reported failures — resolve them before updating");
+        bail!("dependency checks failed — resolve them before updating");
     }
 
     // Fresh clone, validated in tmp before it can become the active pin.
@@ -664,7 +663,7 @@ mod tests {
 
     // --- generations & rollback ---
 
-    use crate::atomic;
+use crate::atomic;
     use std::fs;
     use std::path::PathBuf;
 
