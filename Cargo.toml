@@ -2,6 +2,10 @@
 name = "omarchy-plugin-bridge"
 version = "0.1.0"
 edition = "2024"
+description = "opb — run upstream omarchy-shell on a raw Arch + Hyprland system, component by component"
+license = "MIT"
+repository = "https://github.com/Qurupeco01/omarchy-plugin-bridge"
+authors = ["Jose Gonzalez"]
 
 [[bin]]
 name = "opb"
