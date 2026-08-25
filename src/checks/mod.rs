@@ -1,7 +1,7 @@
 //! Dependency and environment checks — assembled into `opb status` and used
-//! as the FAIL gate before an update flips the pin. Conflicts between running
-//! desktop apps are deliberately out of scope (ADR-0008): report-only would
-//! still be analysis opb does not own.
+//! as the FAIL gate before an update flips the pin. Conflict analysis between
+//! running desktop apps is deliberately out of scope: report-only would still
+//! be analysis opb does not own.
 
 mod bins;
 mod env;

@@ -11,9 +11,10 @@
 //!   IPC-only; ours works headless
 //! - args containing `--upstream` → flag consumed, rest forwarded verbatim
 //!   (raw upstream view; skips all opb additions by design)
-//! - everything else → forwarded verbatim (conflicts between desktop apps
-//!   are out of scope, ADR-0008); `add` gets a gum pre-flight so a missing
-//!   `gum` refuses up front instead of dying mid-clone
+//! - everything else → forwarded verbatim; opb deliberately does no conflict
+//!   analysis between desktop apps — that's the user's territory
+//! - `add` gets a gum pre-flight so a missing `gum` refuses up front instead
+//!   of dying mid-clone
 //!
 //! stdio is inherited so interactive flows and warnings surface verbatim;
 //! upstream's exit code propagates (signal death → 1).
