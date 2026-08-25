@@ -9,7 +9,7 @@
 //! Enable-state gating mirrors the x-ray (plugin_list::state_of): same
 //! storage rules, read-only, headless.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 
 use crate::paths::Paths;
@@ -301,9 +301,366 @@ fn truncate_pad(s: &str, w: usize) -> String {
     }
 }
 
+// --- collision engine (C3) ----------------------------------------------------
+//
+// `hyprctl -j binds` reports modmask bits (verified live @ Hyprland 0.56):
+// shift=1, ctrl=4, alt=8, super=64; Lua-bound combos surface as opaque
+// `__lua` dispatchers — we see occupancy, never intent. That is enough:
+// an occupied combo shadows by definition order, whoever owns it.
+
+pub const MOD_SHIFT: u32 = 1;
+pub const MOD_CTRL: u32 = 4;
+pub const MOD_ALT: u32 = 8;
+pub const MOD_SUPER: u32 = 64;
+
+/// One bind as Hyprland reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveBind {
+    pub modmask: u32,
+    pub key: String,
+    pub keycode: u32,
+}
+
+impl LiveBind {
+    fn describe(&self) -> String {
+        let mut mods = Vec::new();
+        if self.modmask & MOD_SUPER != 0 {
+            mods.push("SUPER");
+        }
+        if self.modmask & MOD_CTRL != 0 {
+            mods.push("CTRL");
+        }
+        if self.modmask & MOD_ALT != 0 {
+            mods.push("ALT");
+        }
+        if self.modmask & MOD_SHIFT != 0 {
+            mods.push("SHIFT");
+        }
+        let key = if self.keycode > 0 {
+            format!("code:{}", self.keycode)
+        } else {
+            self.key.clone()
+        };
+        mods.push(&key);
+        mods.join(" + ")
+    }
+}
+
+/// A normalized combo: modmask + key (either a keysym string or `code:N`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Combo {
+    pub modmask: u32,
+    /// Uppercased keysym, or `code:N` preserved verbatim.
+    pub key: String,
+}
+
+/// Parse an upstream-style combo ("SUPER + CTRL + E", "XF86AudioPlay",
+/// "SUPER + SHIFT + code:201"). Structural validation only — unknown
+/// non-mod tokens become the key; exactly one key token is required.
+pub fn parse_combo(input: &str) -> Result<Combo> {
+    let mut mask = 0u32;
+    let mut key: Option<String> = None;
+    for token in input.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        match token.to_ascii_uppercase().as_str() {
+            "SUPER" | "MOD" => mask |= MOD_SUPER,
+            "CTRL" | "CONTROL" => mask |= MOD_CTRL,
+            "ALT" => mask |= MOD_ALT,
+            "SHIFT" => mask |= MOD_SHIFT,
+            _ if key.is_none() => key = Some(token.to_owned()),
+            _ => anyhow::bail!("combo {input:?}: more than one key token"),
+        }
+    }
+    let Some(key) = key else {
+        anyhow::bail!("combo {input:?}: no key");
+    };
+    Ok(Combo {
+        modmask: mask,
+        key: normalize_key(&key),
+    })
+}
+
+fn normalize_key(key: &str) -> String {
+    // `code:N` keeps its case-sensitive form; everything else compares
+    // case-insensitively (hyprctl reports arrows lowercase, letters uppercase).
+    if let Some(n) = key.strip_prefix("code:") {
+        format!("code:{n}")
+    } else {
+        key.to_ascii_uppercase()
+    }
+}
+
+impl Combo {
+    pub fn to_lua_string(&self) -> String {
+        let mut parts = Vec::new();
+        if self.modmask & MOD_SUPER != 0 {
+            parts.push("SUPER");
+        }
+        if self.modmask & MOD_CTRL != 0 {
+            parts.push("CTRL");
+        }
+        if self.modmask & MOD_ALT != 0 {
+            parts.push("ALT");
+        }
+        if self.modmask & MOD_SHIFT != 0 {
+            parts.push("SHIFT");
+        }
+        // Restore the user's original casing is unnecessary for hl.bind —
+        // upstream feeds the same uppercase style.
+        parts.push(self.key.as_str());
+        parts.join(" + ")
+    }
+
+    fn matches_live(&self, b: &LiveBind) -> bool {
+        if b.keycode > 0 {
+            return self.modmask == b.modmask && self.key == format!("code:{}", b.keycode);
+        }
+        self.modmask == b.modmask && self.key == b.key.to_ascii_uppercase()
+    }
+}
+
+/// Pure: does this combo collide with any live bind? Returns a human-readable
+/// description of the first hit.
+pub fn collision_with(combo: &Combo, live: &[LiveBind]) -> Option<String> {
+    live.iter()
+        .find(|b| combo.matches_live(b))
+        .map(LiveBind::describe)
+}
+
+/// Read the session's binds. `Ok(None)` when hyprctl is unavailable or errors
+/// — callers degrade gracefully (nothing detected, nothing blocked), matching
+/// the plugin enable pre-flight.
+pub fn live_binds() -> Option<Vec<LiveBind>> {
+    let out = std::process::Command::new("hyprctl")
+        .arg("-j")
+        .arg("binds")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(
+        v.as_array()?
+            .iter()
+            .map(|b| LiveBind {
+                modmask: b["modmask"].as_u64().unwrap_or(0) as u32,
+                key: b["key"].as_str().unwrap_or_default().to_owned(),
+                keycode: b["keycode"].as_u64().unwrap_or(0) as u32,
+            })
+            .collect(),
+    )
+}
+
+// --- writer (C3): keys.lua -----------------------------------------------------
+
+/// Render one bind entry. Native-API only (`hl.bind` + `hl.dsp.exec_cmd`),
+/// env-wrapped exec so the entry is self-contained (CONCEPT §4).
+///
+/// The command travels in a Lua **long-bracket string** (`[[…]]`): the shell
+/// fragment legitimately contains both quote flavors (double quotes around
+/// env values inside single-quoted `sh -c`), which would need layered
+/// escaping in a quoted Lua string. Falls back to an escaped quoted string
+/// if the fragment ever contained `]]`.
+pub fn render_entry(pin_dir: &std::path::Path, action: &Action, combo: &Combo) -> String {
+    let inner = format!(
+        "export OMARCHY_PATH=\"{}\"; export PATH=\"{}/bin:$PATH\"; exec {}",
+        pin_dir.display(),
+        pin_dir.display(),
+        action.invocation,
+    );
+    let cmd = format!("sh -c '{}'", inner);
+    let cmd = if cmd.contains("]]") {
+        format!("\"{}\"", cmd.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        format!("[[{cmd}]]")
+    };
+    format!(
+        "-- opb: {id} | {desc}\nhl.bind(\"{combo}\", hl.dsp.exec_cmd({cmd}), {{ description = \"{desc}\" }})\n",
+        id = action.id,
+        desc = lua_escape(&action.description),
+        // The combo MUST be a Lua string — unquoted, `SUPER + F1` would be
+        // parsed as arithmetic on nil globals (found live via hyprctl eval).
+        combo = combo.to_lua_string(),
+    )
+}
+
+fn lua_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+const KEYS_HEADER: &str = "\
+-- opb keybinds (user-owned). Entries are added by `opb keys set`; hand-edit
+-- freely — opb appends, never rewrites existing lines.
+-- Loaded via ~/.config/hypr/opb.lua (require(\"opb\") in your Hyprland config).
+
+";
+
+/// Append an entry atomically, creating the file with its header when absent.
+///
+/// Guard rail: a syntactically-broken keys.lua errors on *every* Hyprland
+/// reload and kills the user's other opb binds with it. When `luac` is
+/// available, the resulting file is parse-checked before landing and the
+/// write is refused (original file untouched) on failure.
+pub fn append_entry(paths: &Paths, entry: &str) -> Result<()> {
+    use std::path::Path;
+    let path = paths.keys_lua();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut next = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("read {}", path.display()))?;
+        if !raw.ends_with('\n') && !raw.is_empty() {
+            raw + "\n"
+        } else {
+            raw
+        }
+    } else {
+        KEYS_HEADER.to_owned()
+    };
+    next.push_str(entry);
+    if let Some(reported) = lua_parse_error(&next) {
+        bail!(
+            "refusing to write {}: generated entry does not parse ({reported}) — \
+             this is an opb bug, please report it",
+            path.display()
+        );
+    }
+    crate::atomic::write(Path::new(&path), next.as_bytes())?;
+    Ok(())
+}
+
+/// `None` when the Lua source parses (or when no Lua toolchain exists to
+/// check with), otherwise the parser's error line.
+fn lua_parse_error(src: &str) -> Option<String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("luac")
+        .arg("-p")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(src.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+}
+
+/// Pure: does an already-written entry bind this same combo? Returns the
+/// conflicting combo string as written in the file. Our entries emit the
+/// combo as the first (quoted) `hl.bind(...)` argument.
+pub fn existing_combo_conflict(keys_lua_src: &str, combo: &Combo) -> Option<String> {
+    for line in keys_lua_src.lines() {
+        let Some(inner) = line.trim().strip_prefix("hl.bind(") else {
+            continue;
+        };
+        let first = inner.split(',').next().unwrap_or("").trim();
+        let Some(unquoted) = first.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+            continue;
+        };
+        if parse_combo(unquoted).is_ok_and(|c| &c == combo) {
+            return Some(unquoted.to_owned());
+        }
+    }
+    None
+}
+
+/// Pure: is this action already bound in the file?
+pub fn action_already_bound(keys_lua_src: &str, action_id: &str) -> bool {
+    keys_lua_src
+        .lines()
+        .any(|l| l.trim() == format!("-- opb: {} |", action_id).trim_end_matches(" |"))
+        || keys_lua_src.contains(&format!("-- opb: {action_id} |"))
+}
+
+/// Interactive [y/N] confirmation (default no — shadowing is destructive).
+fn confirm(question: &str) -> bool {
+    use std::io::Write;
+    print!("{question} [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// `opb keys set <action> <combo>` — the only bind writer (D11).
+pub fn set(paths: &Paths, action_id: &str, combo_input: &str, yes: bool) -> Result<()> {
+    let entries = catalog(paths)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.action.id == action_id)
+        .with_context(|| format!("unknown action {action_id:?} — see `opb keys list [--all]`"))?;
+
+    if entry.state == "off" {
+        println!(
+            "note: component {} is disabled — the bind will no-op until you enable it",
+            entry.action.plugin
+        );
+    }
+
+    let combo = parse_combo(combo_input)?;
+
+    // Occupied combos shadow by definition order — ours would win, silencing
+    // whatever the user had there. Default refusal; --yes overrides.
+    match live_binds().as_deref().map(|l| collision_with(&combo, l)) {
+        None => println!("note: hyprctl unavailable — skipping live collision check"),
+        Some(None) => {}
+        Some(Some(hit)) => {
+            println!(
+                "WARNING: combo {} is already bound ({hit}) — with --yes your new \
+                 bind shadows it by definition order",
+                combo.to_lua_string()
+            );
+            if !yes && !confirm("Bind anyway (your bind wins, the existing one is shadowed)?") {
+                anyhow::bail!("occupied combo — nothing written");
+            }
+        }
+    }
+
+    let path = paths.keys_lua();
+    let src = std::fs::read_to_string(&path).unwrap_or_default();
+    if action_already_bound(&src, action_id) {
+        anyhow::bail!("{action_id} is already bound in {} — remove its line there first", path.display());
+    }
+    if let Some(written) = existing_combo_conflict(&src, &combo) {
+        anyhow::bail!("combo already used in {} for another action ({written})", path.display());
+    }
+
+    let pin_dir = crate::pin::active_dir(paths)?;
+    append_entry(paths, &render_entry(&pin_dir, &entry.action, &combo))?;
+    println!("bound {} → {}", combo.to_lua_string(), action_id);
+    println!("  wrote {}", path.display());
+
+    // Reload makes it live immediately; harmless otherwise.
+    let do_reload = yes
+        || (std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && {
+                use std::io::Write;
+                print!("Run `hyprctl reload` now? [Y/n] ");
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
+                !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+            });
+    if do_reload {
+        match std::process::Command::new("hyprctl").arg("reload").status() {
+            Ok(s) if s.success() => println!("reloaded — bind is live"),
+            _ => println!("hyprctl reload failed — run it manually when ready"),
+        }
+    } else {
+        println!("run `hyprctl reload` when ready");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn parses_single_line_binds_with_and_without_opts() {
@@ -472,5 +829,93 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
         let filtered = render(&entries, true, Some("omarchy.b"));
         assert!(!filtered.contains("a:toggle"));
         assert!(filtered.contains("b:toggle"));
+    }
+
+    #[test]
+    fn combo_parsing_covers_upstream_styles() {
+        let c = parse_combo("SUPER + CTRL + E").unwrap();
+        assert_eq!(c.modmask, MOD_SUPER | MOD_CTRL);
+        assert_eq!(c.key, "E");
+        assert_eq!(c.to_lua_string(), "SUPER + CTRL + E");
+
+        let m = parse_combo("XF86AudioPlay").unwrap();
+        assert_eq!(m.modmask, 0);
+        assert_eq!(m.key, "XF86AUDIOPLAY");
+
+        let code = parse_combo("SUPER + SHIFT + code:201").unwrap();
+        assert_eq!(code.modmask, MOD_SUPER | MOD_SHIFT);
+        assert_eq!(code.key, "code:201");
+
+        assert!(parse_combo("").is_err());
+        assert!(parse_combo("SUPER +").is_err(), "trailing plus = no key");
+        assert!(parse_combo("SUPER + A + B").is_err());
+    }
+
+    #[test]
+    fn collision_matches_modmask_and_key_case_insensitively() {
+        let live = vec![
+            LiveBind { modmask: 64, key: "Q".into(), keycode: 0 },
+            LiveBind { modmask: 68, key: "down".into(), keycode: 0 },
+            LiveBind { modmask: 0, key: "XF86PowerOff".into(), keycode: 0 },
+            LiveBind { modmask: 64, key: "".into(), keycode: 210 },
+        ];
+        let hit = |s: &str| collision_with(&parse_combo(s).unwrap(), &live);
+        assert_eq!(hit("SUPER + q").as_deref(), Some("SUPER + Q"));
+        assert_eq!(hit("SUPER + CTRL + Down").as_deref(), Some("SUPER + CTRL + down"));
+        assert_eq!(hit("xf86poweroff").as_deref(), Some("XF86PowerOff"));
+        assert_eq!(hit("SUPER + code:210").as_deref(), Some("SUPER + code:210"));
+        assert_eq!(hit("SUPER + E"), None);
+        assert_eq!(hit("SHIFT + SUPER + q"), None, "different mask = free");
+    }
+
+    #[test]
+    fn entry_render_is_self_contained_and_quoted() {
+        let action = Action {
+            id: "omarchy.emojis:toggle".into(),
+            description: "Emojis \"quoted\"".into(),
+            plugin: "omarchy.emojis".into(),
+            invocation: "omarchy-shell shell toggle omarchy.emojis".into(),
+            suggested_combo: None,
+            derived: false,
+        };
+        let s = render_entry(Path::new("/pins/a"), &action, &parse_combo("SUPER + CTRL + E").unwrap());
+        assert!(s.starts_with("-- opb: omarchy.emojis:toggle"));
+        // Long-bracket Lua string: both quote flavors inside, no escaping.
+        let expected_cmd = "hl.dsp.exec_cmd([[sh -c 'export OMARCHY_PATH=\"/pins/a\"; \
+                            export PATH=\"/pins/a/bin:$PATH\"; exec omarchy-shell shell toggle omarchy.emojis']])";
+        assert!(s.contains(expected_cmd), "{s}");
+        assert!(s.contains("description = \"Emojis \\\"quoted\\\"\""));
+        assert!(!s.contains('\r'));
+    }
+
+    #[test]
+    fn append_creates_with_header_and_appends_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::new(dir.path().to_path_buf());
+        append_entry(&p, "-- first\nhl.bind(X)\n").unwrap();
+        let raw = std::fs::read_to_string(p.keys_lua()).unwrap();
+        assert!(raw.starts_with("-- opb keybinds (user-owned)"));
+        assert!(raw.ends_with("hl.bind(X)\n"));
+
+        // File without trailing newline gets one before the next entry.
+        // (Fixture entries must be valid Lua — append_entry parse-checks.)
+        std::fs::write(p.keys_lua(), "tail_var = 1").unwrap();
+        append_entry(&p, "-- second\nnext_var = 2\n").unwrap();
+        let raw = std::fs::read_to_string(p.keys_lua()).unwrap();
+        assert!(raw.contains("tail_var = 1\n-- second\n"));
+    }
+
+    #[test]
+    fn self_conflict_detection_by_combo_and_action_marker() {
+        let src = "-- opb: menu:apps | Apps menu\nhl.bind(\"SUPER + ALT + SPACE\", …)\n";
+        assert!(action_already_bound(src, "menu:apps"));
+        assert!(!action_already_bound(src, "menu"));
+
+        let apps = parse_combo("SUPER + ALT + SPACE").unwrap();
+        assert_eq!(
+            existing_combo_conflict(src, &apps).as_deref(),
+            Some("SUPER + ALT + SPACE")
+        );
+        assert!(existing_combo_conflict(src, &parse_combo("SUPER + SPACE").unwrap()).is_none());
     }
 }

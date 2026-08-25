@@ -128,6 +128,16 @@ enum KeysCommand {
         #[arg(long = "plugin", value_name = "ID")]
         plugin: Option<String>,
     },
+    /// Bind an action to a combo (upstream style, e.g. "SUPER + CTRL + E")
+    Set {
+        /// Action id from `opb keys list`, e.g. omarchy.emojis:toggle
+        action: String,
+        /// Combo, e.g. "SUPER + CTRL + E" or "XF86AudioPlay"
+        combo: String,
+        /// Accept collision prompts and auto-reload
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn not_implemented(cmd: &str) -> ! {
@@ -301,6 +311,15 @@ fn main() -> ExitCode {
                         ExitCode::from(exit::FAIL)
                     }
                 },
+                KeysCommand::Set { action, combo, yes } => {
+                    match keys::set(&paths, &action, &combo, yes) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(e) => {
+                            eprintln!("opb keys set: {e:#}");
+                            ExitCode::from(exit::FAIL)
+                        }
+                    }
+                }
             }
         }
         Command::Update(args) => {
