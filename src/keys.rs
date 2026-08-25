@@ -644,8 +644,12 @@ pub fn write_binding(
         );
     }
 
-    let pin_dir = crate::pin::active_dir(paths)?;
-    append_entry(paths, &render_entry(&pin_dir, action, &combo))?;
+    // The env wrapper spells the tree through `current` like every other
+    // launcher/caller — quickshell IPC matches by exact path (see shell_dir).
+    append_entry(
+        paths,
+        &render_entry(&paths.current_dir(), action, &combo),
+    )?;
     Ok(BindOutcome::Written)
 }
 

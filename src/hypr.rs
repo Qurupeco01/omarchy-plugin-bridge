@@ -26,7 +26,11 @@ const TEMPLATE: &str = r#"-- Managed by opb — regenerate with `opb enable`. Do
 -- Keybinds live in OPB_KEYS below (user-owned): edit it freely, or manage
 -- entries with `opb keys set` / `opb keys import-suggested`.
 
-local OPB_PIN = [[<PIN>]]
+-- OPB_PIN is the `current` symlink, never a resolved pin dir: quickshell
+-- matches IPC instances by exact config path, so env, autostart and keybind
+-- dispatches must all spell the tree identically (and a symlink survives
+-- pin bumps without regenerating this file).
+local OPB_PIN = [[<CURRENT>]]
 local OPB_KEYS = [[<KEYS>]]
 
 -- Self-contained exec: every opb-spawned command carries the pin env, so no
@@ -56,10 +60,10 @@ if f then
 end
 "#;
 
-/// Render the managed opb.lua against the active pin.
-pub fn render(pin_dir: &Path, current_dir: &Path, keys_path: &Path) -> String {
+/// Render the managed opb.lua. Everything references the `current` symlink —
+/// see the OPB_PIN note in the template.
+pub fn render(current_dir: &Path, keys_path: &Path) -> String {
     TEMPLATE
-        .replace("<PIN>", &pin_dir.display().to_string())
         .replace("<KEYS>", &keys_path.display().to_string())
         .replace("<CURRENT>", &current_dir.display().to_string())
 }
@@ -184,7 +188,7 @@ pub struct EnableReport {
 /// Install/regenerate opb.lua against the active pin (idempotent — systemctl
 /// enable semantics). Refuses on a non-Lua Hyprland config: sourcing a Lua
 /// module from hyprlang is impossible.
-pub fn enable(paths: &Paths, pin_dir: &Path) -> Result<EnableReport> {
+pub fn enable(paths: &Paths) -> Result<EnableReport> {
     let hyprland_lua = paths.hyprland_lua();
     if !hyprland_lua.exists() {
         bail!(
@@ -195,7 +199,7 @@ pub fn enable(paths: &Paths, pin_dir: &Path) -> Result<EnableReport> {
     }
     atomic::write(
         &paths.opb_lua(),
-        render(pin_dir, &paths.current_dir(), &paths.keys_lua()).as_bytes(),
+        render(&paths.current_dir(), &paths.keys_lua()).as_bytes(),
     )?;
 
     let legacy_conf_removed = remove_legacy_conf(paths)?;
@@ -272,11 +276,10 @@ mod tests {
     #[test]
     fn render_targets_native_api_only_and_loads_keys() {
         let s = render(
-            Path::new("/h/.local/share/opb/upstream/omarchy@abc"),
             Path::new("/h/.local/share/opb/upstream/current"),
             Path::new("/h/.config/opb/keys.lua"),
         );
-        assert!(s.contains("local OPB_PIN = [[/h/.local/share/opb/upstream/omarchy@abc]]"));
+        assert!(s.contains("local OPB_PIN = [[/h/.local/share/opb/upstream/current]]"));
         assert!(s.contains("local OPB_KEYS = [[/h/.config/opb/keys.lua]]"));
         assert!(s.contains("hl.on(\"hyprland.start\""));
         assert!(s.contains("quickshell -p "));
@@ -314,7 +317,7 @@ mod tests {
         fs::create_dir_all(p.hypr_config_dir()).unwrap();
         fs::write(p.hyprland_lua(), "require(\"binds\")\n").unwrap();
 
-        let report = enable(&p, Path::new("/pins/omarchy@abc")).unwrap();
+        let report = enable(&p).unwrap();
 
         assert!(paths_opb_lua_exists(&p));
         assert!(report.needs_require_line);
@@ -328,19 +331,21 @@ mod tests {
         fs::create_dir_all(p.hypr_config_dir()).unwrap();
         fs::write(p.hyprland_lua(), "require(\"opb\")\n").unwrap();
 
-        enable(&p, Path::new("/pins/a")).unwrap();
-        let report = enable(&p, Path::new("/pins/b")).unwrap();
+        enable(&p).unwrap();
+        let report = enable(&p).unwrap();
 
         assert!(!report.needs_require_line);
+        // Everything references the `current` link — regeneration is stable
+        // across pin changes (that is the point of spelling it this way).
         let body = fs::read_to_string(p.opb_lua()).unwrap();
-        assert!(body.contains("/pins/b"), "regenerated against active pin");
+        assert!(body.contains("upstream/current"), "{body}");
     }
 
     #[test]
     fn enable_refuses_without_hyprland_lua() {
         let dir = tempfile::tempdir().unwrap();
         let p = paths(dir.path());
-        assert!(enable(&p, Path::new("/pins/a")).is_err());
+        assert!(enable(&p).is_err());
         assert!(!paths_opb_lua_exists(&p));
     }
 
@@ -353,13 +358,13 @@ mod tests {
 
         // Owned artifact → removed.
         fs::write(p.legacy_opb_conf(), "# Managed by opb — regenerate.\nenv = X\n").unwrap();
-        let report = enable(&p, Path::new("/pins/a")).unwrap();
+        let report = enable(&p).unwrap();
         assert!(report.legacy_conf_removed);
         assert!(!p.legacy_opb_conf().exists());
 
         // User-touched artifact → kept.
         fs::write(p.legacy_opb_conf(), "# my tweaks\n").unwrap();
-        let report = enable(&p, Path::new("/pins/a")).unwrap();
+        let report = enable(&p).unwrap();
         assert!(!report.legacy_conf_removed);
         assert!(p.legacy_opb_conf().exists());
     }
@@ -370,7 +375,7 @@ mod tests {
         let p = paths(dir.path());
         fs::create_dir_all(p.hypr_config_dir()).unwrap();
         fs::write(p.hyprland_lua(), "").unwrap();
-        enable(&p, Path::new("/pins/a")).unwrap();
+        enable(&p).unwrap();
         fs::create_dir_all(p.opb_config_dir()).unwrap();
         fs::write(p.keys_lua(), "-- mine\n").unwrap();
 
@@ -388,7 +393,7 @@ mod tests {
             format!("require(\"binds\")\n{}", require_block()),
         )
         .unwrap();
-        enable(&p, Path::new("/pins/a")).unwrap();
+        enable(&p).unwrap();
         let with_block = disable(&p).unwrap();
         assert!(with_block.block_removed && with_block.lua_removed);
         assert_eq!(

@@ -171,10 +171,10 @@ fn not_implemented(cmd: &str) -> ! {
 /// pin (D15), then handle the activation line: write it as a marker-managed
 /// block on consent, or print it for manual pasting.
 fn enable(paths: &paths::Paths, args: &EnableArgs) -> anyhow::Result<()> {
-    let Some((commit, pin_dir)) = bootstrap::current_pin(paths)? else {
+    let Some((commit, _pin_dir)) = bootstrap::current_pin(paths)? else {
         anyhow::bail!("not bootstrapped yet — run `opb bootstrap` first");
     };
-    let report = hypr::enable(paths, &pin_dir)?;
+    let report = hypr::enable(paths)?;
     println!("opb enable: session wiring installed for pin @ {}", commit);
     if report.legacy_conf_removed {
         println!("  removed stale managed opb.conf (hyprlang era)");

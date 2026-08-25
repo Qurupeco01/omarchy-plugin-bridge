@@ -23,7 +23,6 @@ use std::process::Command;
 
 use crate::env;
 use crate::paths::Paths;
-use crate::pin;
 
 /// Where a `plugin …` arg vector goes.
 #[derive(Debug, PartialEq, Eq)]
@@ -94,7 +93,10 @@ pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
             Ok(0)
         }
         Route::Forward(forward) => {
-            let pin_dir = pin::active_dir(paths)?;
+            // Spell the tree through `current`: quickshell IPC matches
+            // instances by exact config path, and upstream's own helpers
+            // derive theirs from OMARCHY_PATH (see shell::shell_dir).
+            let pin_dir = paths.current_dir();
             let omarchy = pin_dir.join("bin/omarchy");
             if !omarchy.is_file() {
                 bail!("upstream helper missing: {}", omarchy.display());

@@ -15,9 +15,13 @@ use crate::env;
 use crate::paths::Paths;
 use crate::pin;
 
-/// The shell config dir through the `current` symlink (D9).
+/// The shell config dir. Always spelled through the `current` symlink:
+/// quickshell matches IPC instances by exact config path, so every launcher
+/// (`opb up`, autostart) and every IPC caller (`omarchy-shell`, keybind
+/// dispatches) must agree on one form or they cannot see each other.
 pub fn shell_dir(paths: &Paths) -> Result<PathBuf> {
-    Ok(pin::active_dir(paths)?.join("shell"))
+    pin::active_dir(paths)?; // bootstrap validation only
+    Ok(paths.current_dir().join("shell"))
 }
 
 /// Whether any shell process for the current pin is running. Used by
@@ -93,11 +97,10 @@ pub fn up(paths: &Paths) -> Result<()> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         bail!("WAYLAND_DISPLAY is unset — not a Wayland session?");
     }
-    let pin_dir = pin::active_dir(paths)?;
     let mut cmd = Command::new("setsid");
     cmd.args(["--fork", "quickshell", "-p"])
         .arg(&shell_dir)
-        .envs(env::for_pin(&pin_dir));
+        .envs(env::for_pin(&paths.current_dir()));
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd.spawn().context("spawn shell")?;
 
