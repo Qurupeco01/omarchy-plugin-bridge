@@ -279,7 +279,7 @@ mod tests {
     fn full_report_prepends_dependency_rows() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path().to_path_buf());
-        let r = state_report(&paths);
+        let r = report(&paths);
         // Dependency rows lead regardless of bootstrapping; names are stable
         // even where the binaries are missing (CI).
         for name in ["quickshell", "hyprctl", "git", "bash", "WAYLAND_DISPLAY"] {
