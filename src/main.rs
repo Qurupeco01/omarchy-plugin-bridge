@@ -93,6 +93,10 @@ struct EnableArgs {
     /// Never touch hyprland.lua — print the activation line instead
     #[arg(long = "no-line")]
     no_line: bool,
+    /// Also start the shell right now (autostart otherwise applies to the
+    /// next Hyprland start only — exec-once semantics never fire on reload)
+    #[arg(long)]
+    now: bool,
 }
 
 #[derive(Args)]
@@ -182,6 +186,11 @@ fn enable(paths: &paths::Paths, args: &EnableArgs) -> anyhow::Result<()> {
     } else {
         print_require_hint(&hyprland_lua);
     }
+    if !args.now {
+        println!(
+            "  autostart applies from the next Hyprland start; use --now to start it right away"
+        );
+    }
     Ok(())
 }
 
@@ -200,23 +209,21 @@ fn prompt_default_yes(question: &str) -> bool {
     !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
-/// `opb disable` — remove the managed wiring: opb.lua, the marker-scoped
-/// activation block, and any stale legacy artifacts. keys.lua and everything
-/// else in the user's config are untouched (D15).
+/// `opb disable` — remove the managed wiring: activation block, opb.lua, and
+/// any stale legacy artifacts, in an order that keeps every intermediate
+/// state re-parse-consistent. keys.lua and the rest of the user's config are
+/// untouched (D15).
 fn disable(paths: &paths::Paths) -> anyhow::Result<()> {
-    if hypr::disable(paths)? {
+    let report = hypr::disable(paths)?;
+    if report.lua_removed {
         println!("opb disable: removed {}", paths.opb_lua().display());
     } else {
         println!("opb disable: no session wiring installed");
     }
-    if hypr::remove_require_block(paths)? {
+    if report.block_removed {
         println!("  removed managed activation block from {}", paths.hyprland_lua().display());
-    } else {
-        println!(
-            "  remove the require(\"opb\") line from {} manually, if you added one",
-            paths.hyprland_lua().display()
-        );
     }
+    println!("  keys.lua stays yours: {}", paths.keys_lua().display());
     Ok(())
 }
 
@@ -244,7 +251,16 @@ fn main() -> ExitCode {
         }
         Command::Enable(args) => {
             let paths = paths::Paths::from_env();
-            match enable(&paths, &args) {
+            let done = enable(&paths, &args).and_then(|()| {
+                // --now: start immediately; autostart alone only covers the
+                // next Hyprland start (exec-once semantics never fire on reload).
+                if args.now {
+                    shell::up(&paths)
+                } else {
+                    Ok(())
+                }
+            });
+            match done {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb enable: {e:#}");

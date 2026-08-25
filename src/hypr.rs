@@ -209,18 +209,38 @@ pub fn enable(paths: &Paths, pin_dir: &Path) -> Result<EnableReport> {
     })
 }
 
+/// Outcome of `opb disable` worth reporting.
+pub struct DisableReport {
+    /// The managed activation block was stripped from hyprland.lua.
+    pub block_removed: bool,
+    /// opb.lua itself was removed.
+    pub lua_removed: bool,
+}
+
 /// Remove opb-managed wiring. Only deletes files carrying our marker; the
-/// user's hyprland.lua (their require line) and keys.lua are never touched.
-/// Returns whether an opb.lua was removed.
-pub fn disable(paths: &Paths) -> Result<bool> {
+/// user's hyprland.lua beyond our block and keys.lua are never touched.
+///
+/// Ordering matters: the activation block is stripped **first**, so any
+/// config re-parse triggered mid-teardown (Hyprland watches its config dir)
+/// always sees a consistent "not required" state — never require("opb")
+/// pointing at an already-deleted module (error spam until manual reload).
+pub fn disable(paths: &Paths) -> Result<DisableReport> {
+    let block_removed = if paths.hyprland_lua().exists() {
+        remove_require_block(paths)?
+    } else {
+        false
+    };
     remove_legacy_conf(paths)?;
     let opb_lua = paths.opb_lua();
-    if !opb_lua.exists() {
-        return Ok(false);
+    let lua_removed = opb_lua.exists();
+    if lua_removed {
+        std::fs::remove_file(&opb_lua)
+            .with_context(|| format!("remove {}", opb_lua.display()))?;
     }
-    std::fs::remove_file(&opb_lua)
-        .with_context(|| format!("remove {}", opb_lua.display()))?;
-    Ok(true)
+    Ok(DisableReport {
+        block_removed,
+        lua_removed,
+    })
 }
 
 /// Delete the dead hyprlang-era block if (and only if) we still own it.
@@ -354,12 +374,32 @@ mod tests {
         fs::create_dir_all(p.opb_config_dir()).unwrap();
         fs::write(p.keys_lua(), "-- mine\n").unwrap();
 
-        assert!(disable(&p).unwrap());
+        let report = disable(&p).unwrap();
+        assert!(report.lua_removed);
+        // enable() itself never writes the activation block — that is a
+        // separate consented step (main.rs). Simulate it to exercise teardown.
+        assert!(!report.block_removed);
         assert!(!p.opb_lua().exists());
         assert!(p.keys_lua().exists(), "user-owned binds survive");
 
+        // With a block present, disable strips it too.
+        fs::write(
+            p.hyprland_lua(),
+            format!("require(\"binds\")\n{}", require_block()),
+        )
+        .unwrap();
+        enable(&p, Path::new("/pins/a")).unwrap();
+        let with_block = disable(&p).unwrap();
+        assert!(with_block.block_removed && with_block.lua_removed);
+        assert_eq!(
+            fs::read_to_string(p.hyprland_lua()).unwrap(),
+            "require(\"binds\")\n"
+        );
+
         // Second run: nothing left to remove, still a success.
-        assert!(!disable(&p).unwrap());
+        let again = disable(&p).unwrap();
+        assert!(!again.lua_removed);
+        assert!(!again.block_removed);
     }
 
     #[test]
