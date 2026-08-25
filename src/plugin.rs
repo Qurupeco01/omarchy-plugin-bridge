@@ -120,6 +120,9 @@ pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
                 }
                 None => forward,
             };
+            if forward.first().map(String::as_str) == Some("add") {
+                gum_guard(&forward)?;
+            }
             exec(&omarchy, &pin_dir, &forward)
         }
     }
@@ -137,6 +140,50 @@ fn exec(
         .status()
         .with_context(|| format!("spawn {}", omarchy.display()))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Upstream's `plugin add` shells out to `gum` for every interactive step
+/// (URL input, trust confirm, bar placement). On a raw system without gum the
+/// forwarded script dies mid-flight under `set -e`; refuse up front instead.
+/// Non-interactive runs never reach gum (upstream fails cleanly on its own),
+/// `--yes` skips confirm/placement, and help output needs nothing.
+fn gum_guard(forward: &[String]) -> Result<()> {
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if !interactive {
+        return Ok(());
+    }
+    if let Some(reason) = gum_block_reason(forward, which::which("gum").is_ok()) {
+        bail!("add: {reason}");
+    }
+    Ok(())
+}
+
+/// Pure decision for [`gum_guard`]: Some(reason) when the run would die at a
+/// gum prompt. A missing URL arg needs `gum input` even under `--yes`.
+fn gum_block_reason(forward: &[String], gum_installed: bool) -> Option<String> {
+    if gum_installed || forward.first().map(String::as_str) != Some("add") {
+        return None;
+    }
+    let rest = &forward[1..];
+    if rest.iter().any(|a| a == "-h" || a == "--help") {
+        return None;
+    }
+    let has_url = rest.iter().any(|a| !a.starts_with('-'));
+    let has_yes = rest.iter().any(|a| a == "--yes" || a == "-y");
+    if has_url && has_yes {
+        return None;
+    }
+    let hint = match (has_url, has_yes) {
+        (true, true) => unreachable!("covered by the early return above"),
+        (true, false) => "pass --yes to skip its prompts",
+        (false, true) => "a git URL argument is required (--yes does not replace it)",
+        (false, false) => "pass a git URL plus --yes to skip its prompts",
+    };
+    Some(format!(
+        "upstream's add flow needs `gum` for its interactive prompts \
+         (not installed) — install it (`sudo pacman -S gum`) or {hint}"
+    ))
 }
 
 /// Peel `"enable"|"disable" <id>` off the front of the forwarded args.
@@ -370,5 +417,30 @@ mod tests {
         assert_eq!(hits, ["mako owns the notifications bus name"]);
         // INFO rows never block their own component either.
         assert!(collisions_for(&results, "omarchy.bar").is_empty());
+    }
+
+    #[test]
+    fn gum_guard_blocks_exactly_the_dying_shapes() {
+        let mk = |v: &[&str]| -> Vec<String> { v.iter().map(|s| String::from(*s)).collect() };
+
+        // The reported failure: URL given, interactive, no --yes.
+        let msg = gum_block_reason(&mk(&["add", "https://x/y.git"]), false).unwrap();
+        assert!(msg.contains("--yes"));
+        // Bare add dies at `gum input` even with --yes.
+        let msg = gum_block_reason(&mk(&["add", "--yes"]), false).unwrap();
+        assert!(msg.contains("URL argument"));
+        // Both missing: one message naming both ways out.
+        let msg = gum_block_reason(&mk(&["add"]), false).unwrap();
+        assert!(msg.contains("--yes") && msg.contains("URL"));
+        // Surviving shapes.
+        assert!(gum_block_reason(&mk(&["add", "url", "--yes"]), false).is_none());
+        assert!(gum_block_reason(&mk(&["add", "-y", "u"]), false).is_none());
+        assert!(gum_block_reason(&mk(&["add", "url", "--yes"]), true).is_none());
+        assert!(gum_block_reason(&mk(&["add", "-h"]), false).is_none());
+        // Non-add vectors are not this guard's business.
+        assert!(gum_block_reason(&mk(&["remove", "id"]), false).is_none());
+        // Flags are never mistaken for the URL positional.
+        let msg = gum_block_reason(&mk(&["add", "--enable", "--yes"]), false).unwrap();
+        assert!(msg.contains("URL argument"));
     }
 }
