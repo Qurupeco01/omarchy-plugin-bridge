@@ -9,6 +9,7 @@ mod paths;
 mod pin;
 mod plugin;
 mod plugin_list;
+mod plugin_place;
 mod shell;
 mod shelljson;
 mod status;

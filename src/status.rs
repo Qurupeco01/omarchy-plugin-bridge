@@ -63,7 +63,6 @@ fn process_check(paths: &Paths) -> CheckResult {
 mod tests {
     use super::*;
     use crate::atomic;
-    use crate::check::Status;
     use crate::pin::PinLock;
     use std::fs;
 

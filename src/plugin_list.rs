@@ -64,7 +64,7 @@ fn is_listed_disabled(doc: &Value, id: &str) -> bool {
 }
 
 /// Does `id` appear in any bar layout section?
-fn is_placed_in_layout(doc: &Value, id: &str) -> bool {
+pub(crate) fn is_placed_in_layout(doc: &Value, id: &str) -> bool {
     doc.get("bar")
         .and_then(|bar| bar.get("layout"))
         .and_then(|l| l.as_object())
