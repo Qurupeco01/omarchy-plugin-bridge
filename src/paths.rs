@@ -100,6 +100,12 @@ impl Paths {
         self.opb_state_dir().join(LOCK_FILENAME)
     }
 
+    /// PID file of the internal keybind keeper spawned by `opb up` / boot
+    /// autostart — the process that keeps binds applied across reloads.
+    pub fn watch_pid(&self) -> PathBuf {
+        self.opb_state_dir().join("watch.pid")
+    }
+
     /// `$HOME/.config/omarchy` — contract-fixed (upstream reads exactly this).
     pub fn omarchy_config_dir(&self) -> PathBuf {
         self.home.join(".config/omarchy")

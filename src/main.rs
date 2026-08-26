@@ -55,11 +55,9 @@ enum Command {
     /// Minimal doctor: pin state, session wiring, shell process
     Status,
     /// Manage keybinds for shell/plugin actions (zero binds by default, D11).
-    /// Without a subcommand: interactive binder — pick actions, edit each
-    /// suggested combo freely
     Keys {
         #[command(subcommand)]
-        command: Option<KeysCommand>,
+        command: KeysCommand,
     },
     /// Manage plugins — acquire/activate/inspect; the single mutation path
     /// (passthrough to upstream, D13)
@@ -126,7 +124,10 @@ enum UpdateCommand {
 
 #[derive(Subcommand)]
 enum KeysCommand {
-    /// List bindable actions × enabled-state (enabled plugins only unless
+    /// Interactive editor: every bindable action with its bind state; enter
+    /// to edit a combo (pre-filled), empty input to unbind, esc to quit
+    Edit,
+    /// List bindable actions × bind state (enabled plugins only unless
     /// --all; narrow with --plugin)
     List {
         /// Include disabled components' actions
@@ -136,15 +137,13 @@ enum KeysCommand {
         #[arg(long = "plugin", value_name = "ID")]
         plugin: Option<String>,
     },
-    /// Bind an action to a combo (upstream style, e.g. "SUPER + CTRL + E")
+    /// Bind an action to a combo (upstream style, e.g. "SUPER + CTRL + E");
+    /// rebinds the action if it is already bound
     Set {
         /// Action id from `opb keys list`, e.g. omarchy.emojis:toggle
         action: String,
         /// Combo, e.g. "SUPER + CTRL + E" or "XF86AudioPlay"
         combo: String,
-        /// Accept collision prompts and auto-reload
-        #[arg(long)]
-        yes: bool,
     },
 }
 
@@ -279,11 +278,46 @@ fn print_require_hint(hyprland_lua: &std::path::Path) {
     println!("    {}", hypr::require_hint());
 }
 
+/// `opb up` semantics — start the shell and the keybind keeper. The keeper is
+/// the single registrar: it registers keys.lua on connect and re-registers
+/// after every reload (hl.bind adds, never overwrites, so two registrars
+/// would double-bind). Only when the keeper can't start is a bind registered
+/// directly as a fallback.
+fn up_all(paths: &paths::Paths) -> anyhow::Result<()> {
+    shell::up(paths)?;
+    match keys::spawn_watch(paths) {
+        Ok(true) => println!(
+            "opb up: keybind keeper started — keys.lua binds live and \
+             survive `hyprctl reload`"
+        ),
+        Ok(false) => println!("opb up: keybind keeper already running"),
+        Err(e) => {
+            eprintln!("opb up: warning: {e:#}");
+            match keys::apply_live(paths) {
+                Ok(n) if n > 0 => println!("opb up: registered {n} bind(s) (no keeper)"),
+                Ok(_) => {}
+                Err(e2) => eprintln!("opb up: warning: {e2:#}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `opb down` semantics — stop the keeper, stop the shell, unbind.
+fn down_all(paths: &paths::Paths) -> anyhow::Result<()> {
+    keys::stop_watch(paths);
+    shell::down(paths)?;
+    if let Err(e) = keys::clear_live(paths) {
+        eprintln!("opb down: warning: {e:#}");
+    }
+    Ok(())
+}
+
 /// `opb disable` — remove the managed wiring: activation block, opb.lua, and
 /// any stale legacy artifacts, in an order that keeps every intermediate
 /// state re-parse-consistent. keys.lua and the rest of the user's config are
 /// untouched (D15).
-fn disable(paths: &paths::Paths, args: &DisableArgs) -> anyhow::Result<()> {
+fn disable(paths: &paths::Paths) -> anyhow::Result<()> {
     let report = hypr::disable(paths)?;
     if report.lua_removed {
         println!("opb disable: removed {}", paths.opb_lua().display());
@@ -294,14 +328,24 @@ fn disable(paths: &paths::Paths, args: &DisableArgs) -> anyhow::Result<()> {
         println!("  removed managed activation block from {}", paths.hyprland_lua().display());
     }
     println!("  keys.lua stays yours: {}", paths.keys_lua().display());
-    // Mirror of enable --now: unwiring also stops the running shell.
-    if args.now {
-        shell::down(paths)?;
-    }
     Ok(())
 }
 
 fn main() -> ExitCode {
+    // Internal keeper entry: `opb up` (and the boot autostart) re-exec this
+    // binary with OPB_WATCH_DAEMON set. Deliberately not a subcommand — the
+    // keeper is a subprocess of `opb up`, not something a user runs.
+    if std::env::var_os("OPB_WATCH_DAEMON").is_some() {
+        let paths = paths::Paths::from_env();
+        return match keys::watch(&paths) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("opb keeper: {e:#}");
+                ExitCode::from(exit::FAIL)
+            }
+        };
+    }
+
     let cli = Cli::parse();
     match cli.command {
         Command::Bootstrap(args) => {
@@ -322,12 +366,12 @@ fn main() -> ExitCode {
             let paths = paths::Paths::from_env();
             let done = enable(&paths, &args).and_then(|()| {
                 // --now: start immediately; autostart alone only covers the
-                // next Hyprland start (exec-once semantics never fire on reload).
+                // next Hyprland start (exec-once semantics never fire on
+                // reload). Starting now is exactly `opb up`.
                 if args.now {
-                    shell::up(&paths)
-                } else {
-                    Ok(())
+                    up_all(&paths)?;
                 }
+                Ok(())
             });
             match done {
                 Ok(()) => ExitCode::SUCCESS,
@@ -339,8 +383,18 @@ fn main() -> ExitCode {
         }
         Command::Disable(args) => {
             let paths = paths::Paths::from_env();
-            match disable(&paths, &args) {
-                Ok(()) => ExitCode::SUCCESS,
+            match disable(&paths) {
+                Ok(()) => {
+                    // Mirror of enable --now: unwiring now is exactly `opb down`.
+                    if args.now
+                        && let Err(e) = down_all(&paths)
+                    {
+                        eprintln!("opb disable: {e:#}");
+                        ExitCode::from(exit::FAIL)
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
                 Err(e) => {
                     eprintln!("opb disable: {e:#}");
                     ExitCode::from(exit::FAIL)
@@ -349,7 +403,7 @@ fn main() -> ExitCode {
         }
         Command::Up => {
             let paths = paths::Paths::from_env();
-            match shell::up(&paths) {
+            match up_all(&paths) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb up: {e:#}");
@@ -359,7 +413,7 @@ fn main() -> ExitCode {
         }
         Command::Down => {
             let paths = paths::Paths::from_env();
-            match shell::down(&paths) {
+            match down_all(&paths) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb down: {e:#}");
@@ -390,16 +444,18 @@ fn main() -> ExitCode {
         Command::Keys { command } => {
             let paths = paths::Paths::from_env();
             match command {
-                None => match keys::interactive(&paths) {
+                KeysCommand::Edit => match keys::edit(&paths) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
                         eprintln!("opb keys: {e:#}");
                         ExitCode::from(exit::FAIL)
                     }
                 },
-                Some(KeysCommand::List { all, plugin }) => match keys::catalog(&paths) {
+                KeysCommand::List { all, plugin } => match keys::catalog(&paths) {
                     Ok(entries) => {
-                        print!("{}", keys::render(&entries, all, plugin.as_deref()));
+                        let keys_src =
+                            std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
+                        print!("{}", keys::render(&entries, &keys_src, all, plugin.as_deref()));
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
@@ -407,8 +463,8 @@ fn main() -> ExitCode {
                         ExitCode::from(exit::FAIL)
                     }
                 },
-                Some(KeysCommand::Set { action, combo, yes }) => {
-                    match keys::set(&paths, &action, &combo, yes) {
+                KeysCommand::Set { action, combo } => {
+                    match keys::set(&paths, &action, &combo) {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(e) => {
                             eprintln!("opb keys set: {e:#}");

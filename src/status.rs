@@ -42,9 +42,7 @@ fn pin_check(paths: &Paths) -> CheckResult {
 /// Enabled = managed wiring present AND activated in the user's config.
 fn wiring_check(paths: &Paths) -> CheckResult {
     let wired = paths.opb_lua().exists();
-    let required = std::fs::read_to_string(paths.hyprland_lua())
-        .map(|src| crate::hypr::already_required(&src))
-        .unwrap_or(false);
+    let required = crate::hypr::wiring_active(paths);
     match (wired, required) {
         (true, true) => {
             CheckResult::pass_info("session wiring", "enabled (autostarts with Hyprland)")

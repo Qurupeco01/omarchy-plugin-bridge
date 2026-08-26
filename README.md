@@ -57,7 +57,7 @@ opb bootstrap          # clone + pin the newest stable omarchy, generate all-off
 opb enable --now       # wire session autostart (asks before touching hyprland.lua) + start the shell
 opb plugin list        # see what exists; everything starts off
 opb plugin enable omarchy.clock    # something appears on your bar
-opb keys import-suggested          # optional: pick suggested binds for what you enabled
+opb keys edit          # bind shell actions (binds live on the next `opb up`)
 ```
 
 ## Commands
@@ -65,9 +65,9 @@ opb keys import-suggested          # optional: pick suggested binds for what you
 | Command | What it does |
 |---|---|
 | `opb bootstrap [--ref TAG] [--redo]` | Clone + pin upstream (newest stable tag by default), generate all-off `shell.json` |
-| `opb enable [--now] [\--yes\|\--no-line]` | Install session wiring; activation line written on consent |
+| `opb enable [--now] [\--yes\|\--no-line]` | Install boot autostart only; `--now` also starts the shell (keybinds belong to `opb up`/`opb down`, not to enable) |
 | `opb disable [--now]` | Remove session wiring (`keys.lua` stays yours) |
-| `opb up` / `opb down` | Start / stop the shell now |
+| `opb up` / `opb down` | Start / stop the shell **now** — `up` also registers keybinds and starts the reload keeper, `down` removes both |
 | `opb status` | Dependencies, pin state, generations, channel distance — start here when anything looks off |
 | `opb update [--ref TAG] [--rename OLD=NEW]` | Preview → confirm → flip to a newer pin, reconciling `shell.json` |
 | `opb update rollback` | Flip back one generation |
@@ -75,8 +75,9 @@ opb keys import-suggested          # optional: pick suggested binds for what you
 | `opb plugin enable/disable ID` | Toggle components (upstream IPC; conflicts between running apps are not analyzed — that's yours) |
 | `opb plugin list` | Read-only x-ray: manifests × storage rules, works headless |
 | `opb plugin edit` | Interactive editor: every plugin with its state; widgets get left/center/right/off, everything else on/off |
-| `opb keys set ACTION COMBO` | Bind a shell action (refuses occupied combos) |
-| `opb keys import-suggested` | Bulk-pick upstream's suggested binds |
+| `opb keys list [--all]` | Show bind state per action (— unbound · ✓ as suggested · ✎ customized); `--all` includes disabled components |
+| `opb keys edit` | Interactive editor: enter to edit a combo (pre-filled), empty input to unbind; changes apply live |
+| `opb keys set ACTION COMBO` | Bind or rebind a shell action (refuses occupied combos); applies live when the shell is up |
 
 ## Updating
 

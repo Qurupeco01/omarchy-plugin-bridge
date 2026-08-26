@@ -1,5 +1,6 @@
-//! Keybinds — the action catalog (`opb keys list`), the interactive binder
-//! (`opb keys`), and the non-interactive writer (`opb keys set`).
+//! Keybinds — the action catalog (`opb keys list`), the interactive editor
+//! (`opb keys edit`), the non-interactive writer (`opb keys set`), and live
+//! registration (`opb up` / `opb down`).
 //!
 //! The catalog is **derived at runtime from the pin** (ROADMAP C2): parse
 //! upstream's `default/hypr/bindings/*.lua` for shell-facing `o.bind` calls,
@@ -7,8 +8,16 @@
 //! never bound. Nothing here is a static table — pin bumps re-derive
 //! automatically, and the bindings lua paths are contract-watch sentinels.
 //!
-//! Enable-state gating mirrors the x-ray (plugin_list::state_of): same
-//! storage rules, read-only, headless.
+//! Bind state comes from keys.lua, not the component x-ray: each action is
+//! unbound (—), bound to the upstream suggestion (✓), or customized (✎).
+//! Component enable-state only gates what the list/editor offer.
+//!
+//! keys.lua is the single source of truth. Binds are registered into the live
+//! Hyprland session and re-registered after every `hyprctl reload` by an
+//! internal keeper process (spawned by `opb up` / the boot autostart via an
+//! env-var re-exec — it is not a command) — so they survive reloads without
+//! any config write from `up`. `opb enable` wires boot autostart; binds never
+//! depend on enable.
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -249,11 +258,99 @@ pub fn catalog(paths: &Paths) -> Result<Vec<Entry>> {
         .collect())
 }
 
+// --- bind-state resolver ---------------------------------------------------------
+
+/// Bind status of one action, resolved from keys.lua against upstream's
+/// suggested combo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindState {
+    /// No opb-managed bind in keys.lua.
+    Unbound,
+    /// Bound to exactly the upstream-suggested combo (accepted as-is).
+    Suggested,
+    /// Bound to a combo that differs from the suggestion.
+    Customized,
+}
+
+/// Pure: current combo each action is bound to, from opb-marked keys.lua
+/// entries. Foreign/hand-written binds are invisible here — opb only reasons
+/// about what it wrote (`-- opb: <id> |` marker + following `hl.bind` line).
+pub fn bound_combos(keys_lua_src: &str) -> BTreeMap<String, Combo> {
+    let mut map = BTreeMap::new();
+    let mut cur: Option<String> = None;
+    for line in keys_lua_src.lines() {
+        let t = line.trim();
+        if let Some(id) = marker_id(t) {
+            cur = Some(id.to_owned());
+            continue;
+        }
+        if let Some(inner) = t.strip_prefix("hl.bind(") {
+            let first = inner.split(',').next().unwrap_or("").trim();
+            let Some(unquoted) = first.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+                cur = None;
+                continue;
+            };
+            if let Some(id) = &cur
+                && let Ok(c) = parse_combo(unquoted)
+            {
+                map.insert(id.clone(), c);
+            }
+            cur = None;
+        }
+    }
+    map
+}
+
+/// Pure: the action id from an opb marker comment (`-- opb: <id> | <desc>`).
+fn marker_id(t: &str) -> Option<&str> {
+    let rest = t.strip_prefix("-- opb: ")?;
+    let end = rest.find(" |")?;
+    Some(&rest[..end])
+}
+
+/// Pure: classify one action's bind status.
+pub fn bind_state(action: &Action, bound: Option<&Combo>) -> BindState {
+    match bound {
+        None => BindState::Unbound,
+        Some(combo) => {
+            let suggested = action
+                .suggested_combo
+                .as_deref()
+                .and_then(|s| parse_combo(s).ok());
+            match suggested {
+                Some(s) if &s == combo => BindState::Suggested,
+                // Derived actions have no suggestion — any bind is custom.
+                _ => BindState::Customized,
+            }
+        }
+    }
+}
+
+/// Pure: the combo to display for an action — its live bind if any, else the
+/// upstream suggestion, else a placeholder.
+fn display_combo(action: &Action, bound: Option<&Combo>) -> String {
+    if let Some(c) = bound {
+        return c.to_lua_string();
+    }
+    action.suggested_combo.clone().unwrap_or_else(|| "-".to_owned())
+}
+
+/// Icon for a bind state.
+fn bind_icon(state: BindState) -> &'static str {
+    match state {
+        BindState::Unbound => "—",
+        BindState::Suggested => "✓",
+        BindState::Customized => "✎",
+    }
+}
+
 // --- rendering ------------------------------------------------------------------
 
 /// Render rows honoring filters: default hides disabled components; `all`
-/// includes them; `plugin` narrows to exact component id(s).
-pub fn render(entries: &[Entry], all: bool, plugin: Option<&str>) -> String {
+/// includes them; `plugin` narrows to exact component id(s). The BIND column
+/// is per-action state from keys.lua (— / ✓ / ✎), not component enable state.
+pub fn render(entries: &[Entry], keys_lua_src: &str, all: bool, plugin: Option<&str>) -> String {
+    let combos = bound_combos(keys_lua_src);
     let mut out = String::new();
     let width_id = entries
         .iter()
@@ -262,12 +359,11 @@ pub fn render(entries: &[Entry], all: bool, plugin: Option<&str>) -> String {
         .unwrap_or(5)
         .max(5);
     let header = format!(
-        "{:<state_w$}  {:<id_w$}  {:<14}  {}",
-        "STATE",
+        "{:<4} {:<id_w$}  {:<14}  {}",
+        "BIND",
         "ACTION",
-        "COMBO/SUGGESTED",
+        "COMBO",
         "DESCRIPTION",
-        state_w = 6,
         id_w = width_id,
     );
     out.push_str(&header);
@@ -279,15 +375,22 @@ pub fn render(entries: &[Entry], all: bool, plugin: Option<&str>) -> String {
         if plugin.is_some_and(|p| e.action.plugin != p && e.action.id != p) {
             continue;
         }
-        let combo = e.action.suggested_combo.as_deref().unwrap_or("-");
+        let bound = combos.get(&e.action.id);
+        let state = bind_state(&e.action, bound);
+        let combo = display_combo(&e.action, bound);
+        let mut desc = e.action.description.clone();
+        if e.action.derived {
+            desc.push_str(" [derived]");
+        }
+        if e.state == "off" {
+            desc.push_str(" [component off]");
+        }
         out.push_str(&format!(
-            "{:<state_w$}  {:<id_w$}  {:<14}  {}{}\n",
-            e.state,
+            "{:<4} {:<id_w$}  {:<14}  {}\n",
+            bind_icon(state),
             e.action.id,
-            truncate_pad(combo, 14),
-            e.action.description,
-            if e.action.derived { " [derived]" } else { "" },
-            state_w = 6,
+            truncate_pad(&combo, 14),
+            desc,
             id_w = width_id,
         ));
     }
@@ -419,11 +522,16 @@ impl Combo {
     }
 }
 
-/// Pure: does this combo collide with any live bind? Returns a human-readable
+/// Pure: first live bind colliding with `combo`, ignoring an exempt combo
+/// (the action's own combo being replaced). Returns a human-readable
 /// description of the first hit.
-pub fn collision_with(combo: &Combo, live: &[LiveBind]) -> Option<String> {
+pub fn collision_excluding(
+    combo: &Combo,
+    live: &[LiveBind],
+    exempt: Option<&Combo>,
+) -> Option<String> {
     live.iter()
-        .find(|b| combo.matches_live(b))
+        .find(|b| combo.matches_live(b) && !exempt.is_some_and(|e| e.matches_live(b)))
         .map(LiveBind::describe)
 }
 
@@ -489,45 +597,69 @@ fn lua_escape(s: &str) -> String {
 }
 
 const KEYS_HEADER: &str = "\
--- opb keybinds (user-owned). Entries are added by `opb keys`; hand-edit
--- freely — opb appends, never rewrites existing lines.
--- Loaded via ~/.config/hypr/opb.lua (require(\"opb\") in your Hyprland config).
+-- opb keybinds (user-owned). Managed with `opb keys edit` / `opb keys set`;
+-- hand-edit freely. opb only ever edits its own `-- opb:`-marked entries.
+-- Loaded on `opb up` and at boot via ~/.config/hypr/opb.lua (require(\"opb\")).
 
 ";
 
-/// Append an entry atomically, creating the file with its header when absent.
-///
-/// Guard rail: a syntactically-broken keys.lua errors on *every* Hyprland
-/// reload and kills the user's other opb binds with it. When `luac` is
-/// available, the resulting file is parse-checked before landing and the
-/// write is refused (original file untouched) on failure.
-pub fn append_entry(paths: &Paths, entry: &str) -> Result<()> {
-    use std::path::Path;
+/// Pure: keys.lua source with `entry` appended, creating the header when the
+/// file is empty and normalizing a missing trailing newline.
+fn append_source(src: &str, entry: &str) -> String {
+    if src.is_empty() {
+        format!("{KEYS_HEADER}{entry}")
+    } else if src.ends_with('\n') {
+        format!("{src}{entry}")
+    } else {
+        format!("{src}\n{entry}")
+    }
+}
+
+/// Pure: keys.lua source with `action_id`'s opb-marked block replaced by
+/// `replacement` (a full rendered entry), or removed when empty. The block is
+/// the `-- opb: <id> | …` marker line plus the `hl.bind(...)` line after it —
+/// exactly what `render_entry` emits.
+fn rewrite_action_block(src: &str, action_id: &str, replacement: &str) -> String {
+    let marker_prefix = format!("-- opb: {action_id} |");
+    let mut out: Vec<&str> = Vec::new();
+    let mut lines = src.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim_start().starts_with(&marker_prefix) {
+            if lines
+                .peek()
+                .is_some_and(|n| n.trim_start().starts_with("hl.bind("))
+            {
+                lines.next();
+            }
+            if !replacement.is_empty() {
+                out.extend(replacement.lines());
+            }
+            continue;
+        }
+        out.push(line);
+    }
+    let mut s = out.join("\n");
+    if !s.is_empty() && !s.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
+/// Parse-check (when luac exists) and atomically write keys.lua.
+fn write_source(paths: &Paths, next: &str) -> Result<()> {
     let path = paths.keys_lua();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create {}", parent.display()))?;
     }
-    let mut next = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
-        if !raw.ends_with('\n') && !raw.is_empty() {
-            raw + "\n"
-        } else {
-            raw
-        }
-    } else {
-        KEYS_HEADER.to_owned()
-    };
-    next.push_str(entry);
-    if let Some(reported) = lua_parse_error(&next) {
+    if let Some(reported) = lua_parse_error(next) {
         bail!(
             "refusing to write {}: generated entry does not parse ({reported}) — \
              this is an opb bug, please report it",
             path.display()
         );
     }
-    crate::atomic::write(Path::new(&path), next.as_bytes())?;
+    crate::atomic::write(path.as_path(), next.as_bytes())?;
     Ok(())
 }
 
@@ -577,9 +709,11 @@ pub fn action_already_bound(keys_lua_src: &str, action_id: &str) -> bool {
         || keys_lua_src.contains(&format!("-- opb: {action_id} |"))
 }
 
-/// Shared write path for `keys set` and the interactive binder: parse,
-/// collision-check, duplicate-check, atomic append. An occupied combo
-/// shadows only after an explicit confirm — shadowing is destructive.
+/// Shared write path for `keys set` and the interactive editor: parse,
+/// collision-check, duplicate-check, then atomic replace-or-append. An already
+/// bound action is rebound in place (its old line is replaced, never
+/// duplicated); an occupied live combo shadows only after an explicit confirm
+/// — shadowing is destructive.
 pub fn write_binding(
     paths: &Paths,
     action: &Action,
@@ -587,8 +721,38 @@ pub fn write_binding(
     live: Option<&[LiveBind]>,
 ) -> Result<()> {
     let combo = parse_combo(combo_input)?;
+    let src = std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
+    let already = action_already_bound(&src, &action.id);
+    // The combo being replaced is exempt from live-occupancy checks — it is
+    // this action's own current bind, removed by the rewrite below.
+    let own_current = if already {
+        bound_combos(&src).get(&action.id).cloned()
+    } else {
+        None
+    };
 
-    match live.map(|l| collision_with(&combo, l)) {
+    let entry = render_entry(&paths.current_dir(), action, &combo);
+    let next = if already {
+        rewrite_action_block(&src, &action.id, &entry)
+    } else {
+        append_source(&src, &entry)
+    };
+
+    // Duplicate combo in keys.lua for another action — checked with this
+    // action's block removed, so its own old/new lines can't false-hit.
+    let others = if already {
+        rewrite_action_block(&src, &action.id, "")
+    } else {
+        src.clone()
+    };
+    if let Some(written) = existing_combo_conflict(&others, &combo) {
+        anyhow::bail!(
+            "combo already used in {} for another action ({written})",
+            paths.keys_lua().display()
+        );
+    }
+
+    match live.map(|l| collision_excluding(&combo, l, own_current.as_ref())) {
         None => println!("note: hyprctl unavailable — skipping live collision check"),
         Some(None) => {}
         Some(Some(hit)) => {
@@ -603,53 +767,24 @@ pub fn write_binding(
         }
     }
 
-    let path = paths.keys_lua();
-    let src = std::fs::read_to_string(&path).unwrap_or_default();
-    if action_already_bound(&src, &action.id) {
-        anyhow::bail!(
-            "{} is already bound in {} — remove its line there first",
-            action.id,
-            path.display()
-        );
-    }
-    if let Some(written) = existing_combo_conflict(&src, &combo) {
-        anyhow::bail!(
-            "combo already used in {} for another action ({written})",
-            path.display()
-        );
-    }
-
-    // The env wrapper spells the tree through `current` like every other
-    // launcher/caller — quickshell IPC matches by exact path (see shell_dir).
-    append_entry(
-        paths,
-        &render_entry(&paths.current_dir(), action, &combo),
-    )
+    write_source(paths, &next)?;
+    Ok(())
 }
 
-/// Reload prompt shared by both writers. Returns whether a reload ran.
-fn maybe_reload(yes: bool) -> bool {
-    let do_reload = yes
-        || (std::io::IsTerminal::is_terminal(&std::io::stdin())
-            && crate::prompt::confirm("Run `hyprctl reload` now?", true));
-    if !do_reload {
-        println!("run `hyprctl reload` when ready");
-        return false;
+/// Remove an action's opb-marked block from keys.lua (unbind).
+pub fn remove_binding(paths: &Paths, action_id: &str) -> Result<()> {
+    let src = std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
+    let next = rewrite_action_block(&src, action_id, "");
+    if next == src {
+        anyhow::bail!("{} has no opb-managed bind to remove", action_id);
     }
-    match std::process::Command::new("hyprctl").arg("reload").status() {
-        Ok(s) if s.success() => {
-            println!("reloaded — bind(s) are live");
-            true
-        }
-        _ => {
-            println!("hyprctl reload failed — run it manually when ready");
-            false
-        }
-    }
+    write_source(paths, &next)
 }
 
-/// `opb keys set <action> <combo>` — the only bind writer (D11).
-pub fn set(paths: &Paths, action_id: &str, combo_input: &str, yes: bool) -> Result<()> {
+/// `opb keys set <action> <combo>` — the only non-interactive bind writer.
+/// Rebinds in place when the action is already bound; applies live when the
+/// shell is running.
+pub fn set(paths: &Paths, action_id: &str, combo_input: &str) -> Result<()> {
     let entries = catalog(paths)?;
     let entry = entries
         .iter()
@@ -671,127 +806,133 @@ pub fn set(paths: &Paths, action_id: &str, combo_input: &str, yes: bool) -> Resu
         action_id
     );
     println!("  wrote {}", paths.keys_lua().display());
-    maybe_reload(yes);
+    apply_after_write(paths);
     Ok(())
 }
 
-// --- interactive binding (`opb keys`) ---------------------------------------------
+// --- interactive editor (`opb keys edit`) ---------------------------------------
 
-/// Pure: actions worth offering interactively — enabled components only,
-/// nothing already bound in keys.lua.
-pub fn selectable_entries<'a>(
-    entries: &'a [Entry],
-    existing_keys_lua: &str,
-) -> Vec<&'a Entry> {
-    entries
-        .iter()
-        .filter(|e| e.state != "off")
-        .filter(|e| !action_already_bound(existing_keys_lua, &e.action.id))
-        .collect()
+/// Pure: actions worth offering interactively — enabled components only
+/// (the ones relevant to a running system; binding ahead of enable no-ops).
+pub fn enabled_entries(entries: &[Entry]) -> Vec<&Entry> {
+    entries.iter().filter(|e| e.state != "off").collect()
 }
 
-/// `opb keys` (no subcommand) — interactive binder: multi-select actions,
-/// then edit each suggested combo freely (or type one for derived actions).
-/// Occupied combos shadow only after an explicit confirm.
-pub fn interactive(paths: &Paths) -> Result<()> {
+/// `opb keys edit` — one-list editor over every bindable action. Enter edits
+/// a combo (pre-filled with the row's current bind, or the upstream suggestion
+/// when unbound); empty input unbinds; esc on the list exits. The list
+/// re-renders with live bind state after each action. Occupied combos shadow
+/// only after an explicit confirm.
+pub fn edit(paths: &Paths) -> Result<()> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         bail!("interactive keybinding needs a terminal — use `keys list` / `keys set` instead");
     }
     let theme = dialoguer::theme::ColorfulTheme::default();
-
-    let entries = catalog(paths)?;
-    let existing = std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
-    let selectable = selectable_entries(&entries, &existing);
-    if selectable.is_empty() {
-        println!("nothing to bind — every enabled action already has a bind");
-        return Ok(());
-    }
-
-    let labels: Vec<String> = selectable
-        .iter()
-        .map(|e| {
-            format!(
-                "{:<20} {}",
-                truncate_pad(e.action.suggested_combo.as_deref().unwrap_or("(derived)"), 20),
-                truncate_pad(&e.action.description, 40),
-            )
-        })
-        .collect();
-    let chosen = match dialoguer::MultiSelect::with_theme(&theme)
-        .with_prompt("Bind actions (↑↓ move · space toggles · a/all · enter confirms · esc aborts)")
-        .items(&labels)
-        .report(false)
-        .interact_opt()
-    {
-        Err(dialoguer::Error::IO(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
-            return Ok(())
-        }
-        Err(e) => return Err(anyhow::anyhow!("selection failed: {e}")),
-        Ok(None) => {
-            println!("aborted — nothing written");
+    loop {
+        let entries = catalog(paths)?;
+        let existing = std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
+        let combos = bound_combos(&existing);
+        let rows = enabled_entries(&entries);
+        if rows.is_empty() {
+            println!("no bindable actions — every relevant component is off (see `opb plugin list`)");
             return Ok(());
         }
-        Ok(Some(idx)) if idx.is_empty() => {
-            println!("nothing selected — nothing written");
-            return Ok(());
-        }
-        Ok(Some(idx)) => idx,
-    };
 
-    let live = live_binds();
-    let mut written = 0usize;
-    for &i in &chosen {
-        let entry = selectable[i];
-        let combo_input = ask_combo(&theme, entry)?;
-        let Some(combo_input) = combo_input else {
-            println!("skipped {}", entry.action.id);
-            continue;
-        };
-        match write_binding(paths, &entry.action, &combo_input, live.as_deref()) {
-            Ok(()) => {
-                written += 1;
-                println!("bound {combo_input} → {}", entry.action.id);
+        let labels: Vec<String> = rows
+            .iter()
+            .map(|e| {
+                let bound = combos.get(&e.action.id);
+                let state = bind_state(&e.action, bound);
+                let combo = display_combo(&e.action, bound);
+                format!(
+                    "{:<4} {:<20} {:<14} {}",
+                    bind_icon(state),
+                    e.action.id,
+                    truncate_pad(&combo, 14),
+                    e.action.description,
+                )
+            })
+            .collect();
+        let picked = match dialoguer::Select::with_theme(&theme)
+            .with_prompt("Which action (enter=edit · esc quits)")
+            .items(&labels)
+            .interact_opt()
+        {
+            Err(dialoguer::Error::IO(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
+                return Ok(())
             }
-            // A declined shadow or a duplicate stays per-action; real I/O
-            // errors surface the same way and the flow moves on.
-            Err(e) => println!("skipped {}: {:#}", entry.action.id, e),
-        }
-    }
+            Err(e) => return Err(anyhow::anyhow!("selection failed: {e}")),
+            Ok(None) => return Ok(()),
+            Ok(Some(i)) => i,
+        };
 
-    if written > 0 {
-        println!(
-            "wrote {} entr{} to {}",
-            written,
-            if written == 1 { "y" } else { "ies" },
-            paths.keys_lua().display()
-        );
-        maybe_reload(false);
-    } else {
-        println!("nothing written");
+        let entry = rows[picked];
+        let bound = combos.get(&entry.action.id).cloned();
+        let action_id = entry.action.id.clone();
+        let action = entry.action.clone();
+        match ask_combo(&theme, &action, bound.as_ref())? {
+            None => continue, // esc on the input — no change, back to the list
+            Some(None) => {
+                match remove_binding(paths, &action_id) {
+                    Ok(()) => {
+                        println!("unbound {action_id}");
+                        apply_after_write(paths);
+                    }
+                    Err(e) => println!("skipped {action_id}: {:#}", e),
+                }
+            }
+            Some(Some(text)) => {
+                let live = live_binds();
+                match write_binding(paths, &action, &text, live.as_deref()) {
+                    Ok(()) => {
+                        println!(
+                            "bound {} → {}",
+                            parse_combo(&text)?.to_lua_string(),
+                            action_id
+                        );
+                        apply_after_write(paths);
+                    }
+                    // A declined shadow or a duplicate stays per-action; real
+                    // I/O errors surface the same way and the flow moves on.
+                    Err(e) => println!("skipped {action_id}: {:#}", e),
+                }
+            }
+        }
+        // Loop re-renders the list with the fresh bind state.
     }
-    Ok(())
 }
 
-/// One combo prompt, pre-filled with the suggested combo for editing. Empty
-/// input skips the action; invalid combos re-prompt. `None` = skipped.
+/// Combo editor for one action. Returns:
+/// - `Ok(None)` — esc (no change, back to the list)
+/// - `Ok(Some(None))` — empty input → unbind
+/// - `Ok(Some(Some(text)))` — accepted combo
 fn ask_combo(
     theme: &dialoguer::theme::ColorfulTheme,
-    entry: &Entry,
-) -> Result<Option<String>> {
+    action: &Action,
+    bound: Option<&Combo>,
+) -> Result<Option<Option<String>>> {
     loop {
-        let mut input = dialoguer::Input::<String>::with_theme(theme)
-            .with_prompt(format!("Combo for {}", entry.action.id));
-        if let Some(suggested) = entry.action.suggested_combo.as_deref() {
-            input = input.with_initial_text(suggested.to_owned());
-        }
+        let initial = bound
+            .map(|c| c.to_lua_string())
+            .or_else(|| action.suggested_combo.clone())
+            .unwrap_or_default();
+        let input = dialoguer::Input::<String>::with_theme(theme)
+            .with_prompt(format!(
+                "Combo for {} (enter=accept · empty=unbind · esc=cancel)",
+                action.id
+            ))
+            .with_initial_text(initial)
+            // Without this, dialoguer rejects an empty submission and
+            // re-prompts — clearing the field would never unbind.
+            .allow_empty(true);
         match input.interact_text() {
             Ok(text) => {
                 let text = text.trim().to_owned();
                 if text.is_empty() {
-                    return Ok(None);
+                    return Ok(Some(None));
                 }
                 if parse_combo(&text).is_ok() {
-                    return Ok(Some(text));
+                    return Ok(Some(Some(text)));
                 }
                 println!("  invalid combo — upstream style, e.g. SUPER + CTRL + E or XF86AudioPlay");
             }
@@ -800,6 +941,214 @@ fn ask_combo(
             }
             Err(e) => return Err(anyhow::anyhow!("combo input failed: {e}")),
         }
+    }
+}
+
+// --- live registration + watch daemon (`opb up` / `opb down` / `opb keys watch`)
+//
+// Binds belong to the shell lifecycle, not to enable: `opb up` registers
+// keys.lua into the live Hyprland session, `opb down` unregisters it.
+// `opb enable` only wires boot autostart.
+//
+// Registration uses `hyprctl eval`, which dies on the next `hyprctl reload`.
+// Survival comes from `opb keys watch` — a tiny daemon spawned by `opb up`
+// (and by the boot autostart) that listens on Hyprland's events socket and
+// re-registers keys.lua after every `configreloaded` event. The process is
+// the mechanism: alive → binds stay applied; gone → binds die on reload
+// (which is what `down` means anyway). No config write from `up`.
+
+/// Register every keys.lua bind into the running Hyprland session by
+/// evaluating the file — the same source opb.lua's old dofile loaded at boot.
+/// Idempotent: hl.bind re-defines an occupied combo (overwrite). Returns the
+/// number of binds applied.
+///
+/// The code is prepended with a newline: hyprctl's arg parser treats a leading
+/// `--` (the Lua comments) as a flag terminator and prints usage instead of
+/// evaluating (found live).
+pub fn apply_live(paths: &Paths) -> Result<usize> {
+    let src = std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
+    let count = src.matches("-- opb: ").count();
+    if count == 0 {
+        return Ok(0);
+    }
+    let out = std::process::Command::new("hyprctl")
+        .arg("eval")
+        .arg(format!("\n{src}"))
+        .output()
+        .context("spawn hyprctl eval")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "hyprctl eval failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(count)
+}
+
+/// Unregister opb's binds via `hl.unbind` per keys.lua combo. Only combos opb
+/// wrote are touched; foreign binds are never removed. Best-effort per bind.
+pub fn clear_live(paths: &Paths) -> Result<()> {
+    let src = std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
+    let combos = bound_combos(&src);
+    if combos.is_empty() {
+        return Ok(());
+    }
+    let mut removed = 0usize;
+    for (id, combo) in &combos {
+        let code = format!("hl.unbind(\"{}\")", combo.to_lua_string().replace('"', "\\\""));
+        match std::process::Command::new("hyprctl")
+            .arg("eval")
+            .arg(&code)
+            .output()
+        {
+            Ok(o) if o.status.success() => removed += 1,
+            Ok(o) => eprintln!(
+                "opb down: hyprctl unbind {id} failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("opb down: spawn hyprctl unbind: {e}"),
+        }
+    }
+    println!("  removed {removed} opb bind(s)");
+    Ok(())
+}
+
+/// Path of the Hyprland instance events socket (`.socket2.sock`).
+fn events_socket() -> Option<std::path::PathBuf> {
+    let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
+    let runtime = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    Some(std::path::Path::new(&runtime).join("hypr").join(sig).join(".socket2.sock"))
+}
+
+/// `opb` keeper entry (re-exec'd by `opb up` with `OPB_WATCH_DAEMON=1`; not a
+/// command) — register keys.lua, then re-register after every
+/// `configreloaded` event so binds survive `hyprctl reload`. Exits when
+/// Hyprland's socket closes (session ended).
+pub fn watch(paths: &Paths) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixStream;
+    // Guard: never let a second keeper run (a second registrar would
+    // double-bind on reload — hl.bind adds, it does not overwrite). A stale
+    // pid file from a dead keeper is simply ignored.
+    if let Ok(pid_str) = std::fs::read_to_string(paths.watch_pid())
+        && let Ok(pid) = pid_str.trim().parse::<u32>()
+        && pid != std::process::id()
+        && std::path::Path::new(&format!("/proc/{pid}")).exists()
+    {
+        return Ok(());
+    }
+    let sock = events_socket()
+        .context("HYPRLAND_INSTANCE_SIGNATURE unset — not a Hyprland session?")?;
+    let stream = UnixStream::connect(&sock)
+        .with_context(|| format!("connect {}", sock.display()))?;
+    if let Err(e) = apply_live(paths) {
+        eprintln!("opb keeper: initial register failed: {e:#}");
+    }
+    for line in BufReader::new(stream).lines() {
+        let line = line?;
+        if line.starts_with("configreloaded")
+            && let Err(e) = apply_live(paths)
+        {
+            eprintln!("opb keeper: re-register after reload failed: {e:#}");
+        }
+    }
+    Ok(()) // EOF — the Hyprland session is gone
+}
+
+/// Spawn the detached keeper (re-exec of this binary with `OPB_WATCH_DAEMON`,
+/// not a subcommand) and record its pid. Returns whether a new keeper was
+/// started (`false` = one is already alive).
+pub fn spawn_watch(paths: &Paths) -> Result<bool> {
+    if watch_alive(paths) {
+        return Ok(false);
+    }
+    let exe = std::env::current_exe().context("resolve opb binary path")?;
+    let child = std::process::Command::new(&exe)
+        .env("OPB_WATCH_DAEMON", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawn keybind keeper")?;
+    let pid_path = paths.watch_pid();
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    crate::atomic::write(pid_path.as_path(), child.id().to_string().as_bytes())?;
+    Ok(true)
+}
+
+/// Stop the watch daemon (TERM) and drop its pid file. Best-effort; a stale
+/// pid file is simply cleaned up.
+pub fn stop_watch(paths: &Paths) {
+    let pid_path = paths.watch_pid();
+    let Ok(pid_str) = std::fs::read_to_string(&pid_path) else {
+        return;
+    };
+    let Ok(pid) = pid_str.trim().parse::<u32>() else {
+        let _ = std::fs::remove_file(&pid_path);
+        return;
+    };
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    let _ = std::fs::remove_file(&pid_path);
+}
+
+/// `hyprctl reload config-only` — clears every eval'd bind (including stale
+/// old combos an edit left behind), leaving exactly the user's config binds.
+fn reload_config_only() -> Result<()> {
+    let out = std::process::Command::new("hyprctl")
+        .args(["reload", "config-only"])
+        .output()
+        .context("spawn hyprctl reload")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "hyprctl reload failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Is the watch daemon alive? Reads its pid file and probes /proc.
+pub fn watch_alive(paths: &Paths) -> bool {
+    let Ok(pid_str) = std::fs::read_to_string(paths.watch_pid()) else {
+        return false;
+    };
+    let Ok(pid) = pid_str.trim().parse::<u32>() else {
+        return false;
+    };
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Apply a just-written keys.lua. `hl.bind` **adds** on a re-bind (never
+/// overwrites), so the exactness comes from a reload (clears stale eval'd
+/// binds) followed by a **single** re-registration:
+/// - keeper running → the reload alone is enough; it re-applies keys.lua.
+/// - no keeper → reload + one direct eval, and future reloads lose the binds.
+fn apply_after_write(paths: &Paths) {
+    if !crate::shell::is_running(paths) {
+        println!("  note: shell not running — binds apply on the next `opb up`");
+        return;
+    }
+    if let Err(e) = reload_config_only() {
+        println!("  note: {e:#} — binds apply on the next `opb up`");
+        return;
+    }
+    if watch_alive(paths) {
+        println!(
+            "  reloaded — the keybind keeper re-applied keys.lua \
+             (binds survive `hyprctl reload`)"
+        );
+    } else if let Err(e) = apply_live(paths) {
+        println!("  note: {e:#} — binds apply on the next `opb up`");
+    } else {
+        println!(
+            "  reloaded — binds are live, but no keeper is running: start \
+             `opb up` to make them survive `hyprctl reload`"
+        );
     }
 }
 
@@ -964,17 +1313,46 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
             mk("b:toggle", "omarchy.b", "off", true),
         ];
 
-        let default = render(&entries, false, None);
+        let default = render(&entries, "", false, None);
         assert!(default.contains("a:toggle"));
         assert!(!default.contains("b:toggle"));
 
-        let everything = render(&entries, true, None);
+        let everything = render(&entries, "", true, None);
         assert!(everything.contains("b:toggle"));
         assert!(everything.contains("[derived]"));
 
-        let filtered = render(&entries, true, Some("omarchy.b"));
+        let filtered = render(&entries, "", true, Some("omarchy.b"));
         assert!(!filtered.contains("a:toggle"));
         assert!(filtered.contains("b:toggle"));
+    }
+
+    #[test]
+    fn render_bind_column_reflects_keys_lua_state() {
+        let mk = |id: &str, suggested: Option<&str>, state: &'static str| Entry {
+            action: Action {
+                id: id.into(),
+                description: format!("desc {id}"),
+                plugin: "omarchy.x".into(),
+                invocation: "cmd".into(),
+                suggested_combo: suggested.map(str::to_owned),
+                derived: false,
+            },
+            state,
+        };
+        let entries = vec![
+            mk("u:toggle", Some("SUPER + U"), "on"),   // unbound
+            mk("s:toggle", Some("SUPER + S"), "on"),   // bound as suggested
+            mk("c:toggle", Some("SUPER + C"), "on"),   // customized
+        ];
+        let keys = "-- opb: s:toggle | desc s\nhl.bind(\"SUPER + S\", …)\n\
+                    -- opb: c:toggle | desc c\nhl.bind(\"CTRL + C\", …)\n";
+
+        let out = render(&entries, keys, true, None);
+        let line = |id: &str| out.lines().find(|l| l.contains(id)).unwrap();
+        assert!(line("u:toggle").starts_with("—"), "{}", line("u:toggle"));
+        assert!(line("s:toggle").starts_with("✓"), "{}", line("s:toggle"));
+        assert!(line("c:toggle").starts_with("✎"), "{}", line("c:toggle"));
+        assert!(line("c:toggle").contains("CTRL + C"), "current combo shown");
     }
 
     #[test]
@@ -1005,7 +1383,7 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
             LiveBind { modmask: 0, key: "XF86PowerOff".into(), keycode: 0 },
             LiveBind { modmask: 64, key: "".into(), keycode: 210 },
         ];
-        let hit = |s: &str| collision_with(&parse_combo(s).unwrap(), &live);
+        let hit = |s: &str| collision_excluding(&parse_combo(s).unwrap(), &live, None);
         assert_eq!(hit("SUPER + q").as_deref(), Some("SUPER + Q"));
         assert_eq!(hit("SUPER + CTRL + Down").as_deref(), Some("SUPER + CTRL + down"));
         assert_eq!(hit("xf86poweroff").as_deref(), Some("XF86PowerOff"));
@@ -1035,20 +1413,15 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
     }
 
     #[test]
-    fn append_creates_with_header_and_appends_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = Paths::new(dir.path().to_path_buf());
-        append_entry(&p, "-- first\nhl.bind(X)\n").unwrap();
-        let raw = std::fs::read_to_string(p.keys_lua()).unwrap();
-        assert!(raw.starts_with("-- opb keybinds (user-owned)"));
-        assert!(raw.ends_with("hl.bind(X)\n"));
+    fn append_source_creates_header_and_normalizes_trailing_newline() {
+        // Empty source → header prepended.
+        let src = append_source("", "-- first\nhl.bind(X)\n");
+        assert!(src.starts_with("-- opb keybinds (user-owned)"));
+        assert!(src.ends_with("hl.bind(X)\n"));
 
-        // File without trailing newline gets one before the next entry.
-        // (Fixture entries must be valid Lua — append_entry parse-checks.)
-        std::fs::write(p.keys_lua(), "tail_var = 1").unwrap();
-        append_entry(&p, "-- second\nnext_var = 2\n").unwrap();
-        let raw = std::fs::read_to_string(p.keys_lua()).unwrap();
-        assert!(raw.contains("tail_var = 1\n-- second\n"));
+        // Source without trailing newline gets one before the next entry.
+        let merged = append_source("tail_var = 1", "-- second\nnext_var = 2\n");
+        assert!(merged.contains("tail_var = 1\n-- second\n"));
     }
 
     #[test]
@@ -1080,24 +1453,72 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
     }
 
     #[test]
-    fn selectable_filters_disabled_and_already_bound() {
+    fn enabled_filters_disabled_but_keeps_bound() {
         let entries = vec![
             cand("a:toggle", "omarchy.a", Some("SUPER + A"), "on"),
             cand("b:toggle", "omarchy.b", Some("SUPER + B"), "off"),
-            // derived → no upstream combo → still selectable, combo asked by hand
+            // derived → no upstream combo → still offered
             cand("c:toggle", "omarchy.c", None, "on"),
         ];
-        let existing = "-- opb: a:toggle | desc a\n";
 
-        let all = selectable_entries(&entries, "");
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0].action.id, "a:toggle");
-        assert_eq!(all[1].action.id, "c:toggle");
+        let got = enabled_entries(&entries);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].action.id, "a:toggle");
+        assert_eq!(got[1].action.id, "c:toggle");
+    }
 
-        // Disabled and already-bound are excluded.
-        let got = selectable_entries(&entries, existing);
-        assert!(got.iter().all(|e| e.action.id != "b:toggle"));
-        assert!(got.iter().all(|e| e.action.id != "a:toggle"));
+    #[test]
+    fn bound_combos_parses_markers_and_state_classification() {
+        let keys = "-- opb: a:toggle | desc a\nhl.bind(\"SUPER + A\", …)\n\
+                    -- opb: b:toggle | desc b\nhl.bind(\"SUPER + SHIFT + B\", …)\n";
+        let combos = bound_combos(keys);
+        assert_eq!(
+            combos.get("a:toggle").map(Combo::to_lua_string).as_deref(),
+            Some("SUPER + A")
+        );
+        assert_eq!(
+            combos.get("b:toggle").map(Combo::to_lua_string).as_deref(),
+            Some("SUPER + SHIFT + B")
+        );
+        assert!(!combos.contains_key("c:toggle"));
+
+        let mk = |id: &str, suggested: Option<&str>| Action {
+            id: id.into(),
+            description: "d".into(),
+            plugin: "omarchy.x".into(),
+            invocation: "cmd".into(),
+            suggested_combo: suggested.map(str::to_owned),
+            derived: false,
+        };
+        // Suggested match → ✓; divergence → ✎; none → —.
+        assert_eq!(
+            bind_state(&mk("a:toggle", Some("SUPER + A")), combos.get("a:toggle")),
+            BindState::Suggested
+        );
+        assert_eq!(
+            bind_state(&mk("b:toggle", Some("SUPER + B")), combos.get("b:toggle")),
+            BindState::Customized
+        );
+        assert_eq!(
+            bind_state(&mk("c:toggle", Some("SUPER + C")), combos.get("c:toggle")),
+            BindState::Unbound
+        );
+        // Derived action (no suggestion): any bind reads as customized.
+        let derived = Action {
+            id: "d:toggle".into(),
+            description: "d".into(),
+            plugin: "omarchy.x".into(),
+            invocation: "cmd".into(),
+            suggested_combo: None,
+            derived: true,
+        };
+        assert_eq!(
+            bind_state(&derived, combos.get("a:toggle")),
+            BindState::Customized
+        );
+        // Foreign binds (no opb marker) are invisible to the resolver.
+        let foreign = "-- mine\nhl.bind(\"SUPER + F\", …)\n";
+        assert!(bound_combos(foreign).is_empty());
     }
 
     fn fixture_paths() -> (tempfile::TempDir, Paths) {
@@ -1135,7 +1556,33 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
         write_binding(&p, &action, "SUPER + Z", Some(&live)).unwrap();
         assert!(p.keys_lua().exists());
 
-        // Second attempt for the same action is refused outright.
-        assert!(write_binding(&p, &action, "SUPER + Y", Some(&live)).is_err());
+        // Rebinding the same action replaces its entry in place — one bind,
+        // never a duplicate.
+        write_binding(&p, &action, "SUPER + Y", Some(&live)).unwrap();
+        let raw = std::fs::read_to_string(p.keys_lua()).unwrap();
+        assert_eq!(raw.matches("-- opb: x:toggle").count(), 1, "{raw}");
+        assert!(raw.contains("SUPER + Y"), "{raw}");
+        assert!(!raw.contains("SUPER + Z"), "{raw}");
+
+        // Unbind removes the block.
+        remove_binding(&p, "x:toggle").unwrap();
+        let raw = std::fs::read_to_string(p.keys_lua()).unwrap();
+        assert!(!raw.contains("x:toggle"), "{raw}");
+    }
+
+    #[test]
+    fn rewrite_action_block_replaces_only_the_marked_entry() {
+        let src = "-- opb: a:toggle | desc a\nhl.bind(\"SUPER + A\", …)\n\
+                   -- opb: b:toggle | desc b\nhl.bind(\"SUPER + B\", …)\n";
+        let got = rewrite_action_block(src, "a:toggle", "-- opb: a:toggle | desc a\nhl.bind(\"SUPER + X\", …)\n");
+        assert!(got.contains("SUPER + X"));
+        assert!(!got.contains("SUPER + A"));
+        // The untouched neighbor entry survives verbatim.
+        assert!(got.contains("SUPER + B"));
+
+        // Empty replacement = removal of exactly that block.
+        let removed = rewrite_action_block(src, "b:toggle", "");
+        assert!(!removed.contains("b:toggle"));
+        assert!(removed.contains("SUPER + A"));
     }
 }

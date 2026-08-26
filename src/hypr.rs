@@ -17,21 +17,27 @@ use crate::paths::Paths;
 pub const MANAGED_MARKER: &str = "# Managed by opb";
 
 const TEMPLATE: &str = r#"-- Managed by opb — regenerate with `opb enable`. Do not edit by hand.
--- Session wiring for the pinned omarchy-shell: autostart + keybinds.
+-- Session wiring for the pinned omarchy-shell: autostart + keybind keeper.
 --
 -- Activate by adding this line to your Hyprland Lua config:
 --   require("opb")
 -- Deactivate with `opb disable` and remove that line.
 --
--- Keybinds live in OPB_KEYS below (user-owned): edit it freely, or manage
--- entries with `opb keys set` / `opb keys import-suggested`.
+-- Keybinds live in ~/.config/opb/keys.lua (user-owned): manage them with
+-- `opb keys edit` / `opb keys set`. An internal keeper (spawned here at boot,
+-- and by `opb up`) keeps them applied across `hyprctl reload`s — the process
+-- is the mechanism, keys.lua the single source of truth.
 
 -- OPB_PIN is the `current` symlink, never a resolved pin dir: quickshell
 -- matches IPC instances by exact config path, so env, autostart and keybind
 -- dispatches must all spell the tree identically (and a symlink survives
 -- pin bumps without regenerating this file).
 local OPB_PIN = [[<CURRENT>]]
-local OPB_KEYS = [[<KEYS>]]
+
+-- Absolute path of the opb binary, embedded at generation time: the boot
+-- autostart spawns the keybind keeper from it (PATH at boot is not guaranteed
+-- to include ~/.local/bin).
+local OPB_WATCH = [[<WATCH>]]
 
 -- Self-contained exec: every opb-spawned command carries the pin env, so no
 -- session-wide env is needed (CONCEPT §4 Environment handling).
@@ -51,22 +57,16 @@ end
 -- Fires once per Hyprland instance — never on reload (exec-once semantics).
 hl.on("hyprland.start", function()
   hl.exec_cmd(opb_exec("quickshell -p " .. opb_quote("<CURRENT>/shell")))
+  -- Keep keybinds applied across reloads (no-op when keys.lua is empty).
+  hl.exec_cmd(opb_exec("OPB_WATCH_DAEMON=1 " .. OPB_WATCH))
 end)
-
--- Load user keybinds when present. Optional until `opb keys …` creates the
--- file; it stays authoritative — opb only ever appends entries.
-local f = io.open(OPB_KEYS, "r")
-if f then
-  f:close()
-  dofile(OPB_KEYS)
-end
 "#;
 
 /// Render the managed opb.lua. Everything references the `current` symlink —
 /// see the OPB_PIN note in the template.
-pub fn render(current_dir: &Path, keys_path: &Path) -> String {
+pub fn render(current_dir: &Path, opb_exe: &Path) -> String {
     TEMPLATE
-        .replace("<KEYS>", &keys_path.display().to_string())
+        .replace("<WATCH>", &opb_exe.display().to_string())
         .replace("<CURRENT>", &current_dir.display().to_string())
 }
 
@@ -96,6 +96,16 @@ pub fn already_required(hyprland_lua_src: &str) -> bool {
 /// A user-modified or foreign opb.conf is left untouched.
 pub fn is_managed(src: &str) -> bool {
     src.trim_start().starts_with(MANAGED_MARKER)
+}
+
+/// Is the session wiring installed AND activated in the user's config? The
+/// shared answer for "do binds fire at boot / on reload" (keys commands and
+/// `opb status` reason about the same state).
+pub fn wiring_active(paths: &Paths) -> bool {
+    paths.opb_lua().exists()
+        && std::fs::read_to_string(paths.hyprland_lua())
+            .map(|src| already_required(&src))
+            .unwrap_or(false)
 }
 
 // --- Managed require block -------------------------------------------------
@@ -201,7 +211,11 @@ pub fn enable(paths: &Paths) -> Result<EnableReport> {
     }
     atomic::write(
         &paths.opb_lua(),
-        render(&paths.current_dir(), &paths.keys_lua()).as_bytes(),
+        render(
+            &paths.current_dir(),
+            &std::env::current_exe().context("resolve opb binary path")?,
+        )
+        .as_bytes(),
     )?;
 
     let legacy_conf_removed = remove_legacy_conf(paths)?;
@@ -276,18 +290,22 @@ mod tests {
     }
 
     #[test]
-    fn render_targets_native_api_only_and_loads_keys() {
+    fn render_targets_native_api_only_and_spawns_keeper() {
         let s = render(
             Path::new("/h/.local/share/opb/upstream/current"),
-            Path::new("/h/.config/opb/keys.lua"),
+            Path::new("/usr/local/bin/opb"),
         );
         assert!(s.contains("local OPB_PIN = [[/h/.local/share/opb/upstream/current]]"));
-        assert!(s.contains("local OPB_KEYS = [[/h/.config/opb/keys.lua]]"));
+        assert!(s.contains("local OPB_WATCH = [[/usr/local/bin/opb]]"));
         assert!(s.contains("hl.on(\"hyprland.start\""));
         assert!(s.contains("quickshell -p "));
-        assert!(s.contains("dofile(OPB_KEYS)"));
-        // Autostart + keybind loading only — zero binds of its own (D11),
-        // and no dependency on omarchy helper functions.
+        // The keeper is spawned at boot via an env-var re-exec — not a
+        // config dofile, and not a subcommand.
+        assert!(s.contains("OPB_WATCH_DAEMON=1"));
+        assert!(!s.contains("dofile"));
+        assert!(!s.contains("keys watch"));
+        // Autostart + keeper only — zero binds of its own (D11), and no
+        // dependency on omarchy helper functions.
         assert!(!s.contains("hl.bind"));
         assert!(!s.contains("o.bind"));
         assert!(s.contains(require_hint()));
