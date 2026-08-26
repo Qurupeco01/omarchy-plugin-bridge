@@ -74,6 +74,7 @@ opb keys import-suggested          # optional: pick suggested binds for what you
 | `opb plugin add URL [\--yes]` | Install a third-party plugin (upstream's flow) |
 | `opb plugin enable/disable ID` | Toggle components (upstream IPC; conflicts between running apps are not analyzed — that's yours) |
 | `opb plugin list` | Read-only x-ray: manifests × storage rules, works headless |
+| `opb plugin edit` | Interactive editor: every plugin with its state; widgets get left/center/right/off, everything else on/off |
 | `opb keys set ACTION COMBO` | Bind a shell action (refuses occupied combos) |
 | `opb keys import-suggested` | Bulk-pick upstream's suggested binds |
 

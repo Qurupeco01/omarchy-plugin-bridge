@@ -63,16 +63,31 @@ fn is_listed_disabled(doc: &Value, id: &str) -> bool {
         .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(id)))
 }
 
+/// Id of one bar-layout entry — a bare string (`"omarchy.clock"`) or an
+/// object (`{"id": "omarchy.clock", ...}`); upstream writes both.
+pub(crate) fn layout_entry_id(entry: &Value) -> Option<&str> {
+    match entry {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(o) => o.get("id").and_then(|v| v.as_str()),
+        _ => None,
+    }
+}
+
+/// Which bar-layout section `id` occupies, if any.
+pub(crate) fn placed_section<'a>(doc: &'a Value, id: &str) -> Option<&'a str> {
+    let layout = doc.get("bar")?.get("layout")?.as_object()?;
+    for (section, values) in layout {
+        let Some(arr) = values.as_array() else { continue };
+        if arr.iter().any(|e| layout_entry_id(e) == Some(id)) {
+            return Some(section.as_str());
+        }
+    }
+    None
+}
+
 /// Does `id` appear in any bar layout section?
 pub(crate) fn is_placed_in_layout(doc: &Value, id: &str) -> bool {
-    doc.get("bar")
-        .and_then(|bar| bar.get("layout"))
-        .and_then(|l| l.as_object())
-        .is_some_and(|layout| {
-            layout.values().any(|v| {
-                v.as_array().is_some_and(|a| a.iter().any(|e| e.as_str() == Some(id)))
-            })
-        })
+    placed_section(doc, id).is_some()
 }
 
 /// Does `id` appear in `plugins[]`?
@@ -342,5 +357,27 @@ mod tests {
         assert!(is_first_party("omarchy.lock"));
         assert!(!is_first_party("third.party"));
         assert!(!is_first_party("omarchish")); // prefix must be the full segment
+    }
+
+    #[test]
+    fn placement_detects_string_and_object_layout_entries() {
+        let doc = serde_json::json!({
+            "disabledPlugins": [],
+            "bar": {
+                "id": "omarchy.bar",
+                "layout": {
+                    "left": ["omarchy.clock"],
+                    "center": [{ "id": "omarchy.media", "hideTotal": true }],
+                    "right": []
+                }
+            }
+        });
+        // Upstream writes objects; the x-ray must see through both forms.
+        assert_eq!(placed_section(&doc, "omarchy.clock"), Some("left"));
+        assert_eq!(placed_section(&doc, "omarchy.media"), Some("center"));
+        assert!(is_placed_in_layout(&doc, "omarchy.media"));
+        assert!(is_placed_in_layout(&doc, "omarchy.clock"));
+        assert_eq!(placed_section(&doc, "omarchy.agents"), None);
+        assert!(!is_placed_in_layout(&doc, "omarchy.agents"));
     }
 }

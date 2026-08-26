@@ -8,8 +8,8 @@ mod hypr;
 mod paths;
 mod pin;
 mod plugin;
+mod plugin_edit;
 mod plugin_list;
-mod plugin_place;
 mod prompt;
 mod shell;
 mod shelljson;
@@ -63,9 +63,8 @@ enum Command {
     /// Manage plugins — acquire/activate/inspect; the single mutation path
     /// (passthrough to upstream, D13)
     Plugin {
-        /// Arguments forwarded verbatim, e.g. `opb plugin add owner/repo`
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: Option<PluginCommand>,
     },
     /// Update the upstream pin (preview → confirm → flip, with down-window
     /// shell.json reconciliation)
@@ -146,6 +145,84 @@ enum KeysCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// `opb plugin …` — known upstream verbs are modeled for help + completion;
+/// each keeps `trailing_var_arg` so its inner args forward verbatim. Unknown
+/// verbs fall through to `External` and forward verbatim too, preserving the
+/// thin passthrough (anti-duplication §5.3, D13).
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// Add a plugin from git
+    Add {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Clone a built-in plugin into your config
+    Clone {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Remove an installed plugin
+    Remove {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Update git-managed plugins
+    Update {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Interactive editor: every plugin with its state; widgets get a
+    /// left/center/right/off section, everything else on/off
+    Edit {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Enable a plugin
+    Enable {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Disable a plugin
+    Disable {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// List installed plugins
+    List {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Validate a manifest folder
+    Validate {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Unknown plugin subcommand — forwarded verbatim to upstream
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+/// Rebuild the verbatim `plugin …` arg vector from a parsed subcommand so the
+/// existing routing in [`crate::plugin`] stays untouched.
+fn plugin_args(command: PluginCommand) -> Vec<String> {
+    match command {
+        PluginCommand::Add { args } => chain_verb("add", args),
+        PluginCommand::Clone { args } => chain_verb("clone", args),
+        PluginCommand::Remove { args } => chain_verb("remove", args),
+        PluginCommand::Update { args } => chain_verb("update", args),
+        PluginCommand::Edit { args } => chain_verb("edit", args),
+        PluginCommand::Enable { args } => chain_verb("enable", args),
+        PluginCommand::Disable { args } => chain_verb("disable", args),
+        PluginCommand::List { args } => chain_verb("list", args),
+        PluginCommand::Validate { args } => chain_verb("validate", args),
+        PluginCommand::External(args) => args,
+    }
+}
+
+fn chain_verb(verb: &str, args: Vec<String>) -> Vec<String> {
+    std::iter::once(verb.to_string()).chain(args).collect()
 }
 
 /// `opb enable` — install/regenerate the managed opb.lua against the active
@@ -289,8 +366,12 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Plugin { args } => {
+        Command::Plugin { command } => {
             let paths = paths::Paths::from_env();
+            let args = match command {
+                Some(cmd) => plugin_args(cmd),
+                None => Vec::new(),
+            };
             match plugin::run(&paths, &args) {
                 Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(exit::FAIL)),
                 Err(e) => {

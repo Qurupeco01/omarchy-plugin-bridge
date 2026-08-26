@@ -30,7 +30,7 @@ use crate::paths::Paths;
 pub enum Route {
     Help,
     ListXray,
-    PlaceTui,
+    EditTui,
     Forward(Vec<String>),
 }
 
@@ -54,8 +54,8 @@ pub fn route(args: &[String]) -> Route {
     if stripped.as_slice() == ["list"] {
         return Route::ListXray;
     }
-    if stripped.as_slice() == ["place"] {
-        return Route::PlaceTui;
+    if stripped.as_slice() == ["edit"] {
+        return Route::EditTui;
     }
     Route::Forward(stripped)
 }
@@ -70,8 +70,10 @@ Acquire:
   opb plugin update [id] [--yes]               update git-managed plugins
 
 Activate (requires a running shell — `opb up`; state persists via IPC):
-  opb plugin place                             interactive bar placement: pick a plugin ×
-                                               left/center/right; forwards to upstream
+  opb plugin edit                                interactive editor: every plugin with its
+                                                 state — widgets get left/center/right/off,
+                                                 everything else on/off; actions forward to
+                                                 upstream (esc on the list quits)
   opb plugin enable <id> [placement]           placement: --section left|center|right,
                                                --index N, --before/--after <widget-id>
   opb plugin disable <id>
@@ -98,8 +100,8 @@ pub fn run(paths: &Paths, args: &[String]) -> Result<i32> {
             print!("{}", crate::plugin_list::render_rows(&rows));
             Ok(0)
         }
-        Route::PlaceTui => {
-            crate::plugin_place::run(paths)?;
+        Route::EditTui => {
+            crate::plugin_edit::run(paths)?;
             Ok(0)
         }
         Route::Forward(forward) => {
@@ -206,7 +208,7 @@ mod tests {
         assert_eq!(route(&mk(&["--help"])), Route::Help);
         assert_eq!(route(&mk(&["help"])), Route::Help);
         assert_eq!(route(&mk(&["list"])), Route::ListXray);
-        assert_eq!(route(&mk(&["place"])), Route::PlaceTui);
+        assert_eq!(route(&mk(&["edit"])), Route::EditTui);
         // Escape hatch: --upstream consumes itself, forwards the rest — even bare list.
         assert_eq!(route(&mk(&["list", "--upstream"])), Route::Forward(mk(&["list"])));
         assert_eq!(
