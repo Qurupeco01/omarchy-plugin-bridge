@@ -35,6 +35,11 @@ pub fn require_dependencies() -> Result<()> {
 
 pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
     if let Some((commit, pin_dir)) = pin::active_pin(paths)? {
+        // Bootstrap is the installation step: re-running it also repairs
+        // runtime installs (the icon font) on already-bootstrapped machines.
+        if crate::fonts::ensure_installed(paths)? {
+            println!("opb bootstrap: installed omarchy icon font");
+        }
         return if opts.redo {
             regenerate(paths, &commit, &pin_dir)
         } else {
@@ -82,6 +87,9 @@ pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
             &paths.shell_json(),
             shelljson::render(&shelljson::generate(&ids)).as_bytes(),
         )?;
+        if crate::fonts::ensure_installed(paths)? {
+            println!("opb bootstrap: installed omarchy icon font");
+        }
         hyprless_success_message(paths, &reference, &commit);
         Ok(())
     })();

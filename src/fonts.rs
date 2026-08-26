@@ -1,10 +1,11 @@
 //! The `omarchy` icon font. The bar and menu render their brand glyphs
 //! (U+E900–E907: omarchy logo, agent marks, install-ai icons) from the custom
 //! `omarchy` font shipped as `default/fonts/omarchy/omarchy.ttf` inside the
-//! pin. Nothing installs it on a raw system, so those icons render blank.
-//! `opb enable` copies the file into fontconfig's user font dir and refreshes
-//! the cache — one reversible file, never a system font dir or a fontconfig
-//! rule.
+//! pin. Nothing installs it on a raw system, so those icons render blank —
+//! and a shell launched with plain `opb up` never runs `opb enable`'s wiring,
+//! so the font is installed at **bootstrap**, the installation step. One
+//! reversible file in fontconfig's user font dir, never a system font dir or
+//! a fontconfig rule.
 
 use anyhow::{Context, Result};
 
@@ -32,7 +33,7 @@ pub fn check(present: bool) -> CheckResult {
     } else {
         CheckResult::warn(
             "omarchy icon font",
-            "not installed — `opb enable` copies it from the pin",
+            "not installed — `opb bootstrap` copies it from the pin",
         )
     }
 }
@@ -43,13 +44,26 @@ pub enum InstallOutcome {
     AlreadyPresent,
 }
 
+/// Idempotent install that reports whether it changed anything — lets the
+/// caller print a line only when the font actually landed.
+pub fn ensure_installed(paths: &Paths) -> Result<bool> {
+    Ok(install(paths)? == InstallOutcome::Installed)
+}
+
 /// Copy the active pin's icon font into the user font dir and refresh
 /// fontconfig. Idempotent; atomic write.
 pub fn install(paths: &Paths) -> Result<InstallOutcome> {
     let source = paths.current_dir().join(REL);
+    let bytes = match std::fs::read(&source) {
+        Ok(b) => b,
+        // A pin that ships no icon font has nothing to install — not a
+        // bootstrap failure.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(InstallOutcome::AlreadyPresent)
+        }
+        Err(e) => return Err(e).with_context(|| format!("read {}", source.display())),
+    };
     let dest = paths.fonts_dir().join("omarchy").join("omarchy.ttf");
-    let bytes = std::fs::read(&source)
-        .with_context(|| format!("read {}", source.display()))?;
     if dest.is_file() && std::fs::read(&dest).ok().as_deref() == Some(bytes.as_slice()) {
         return Ok(InstallOutcome::AlreadyPresent);
     }
