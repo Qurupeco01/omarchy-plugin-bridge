@@ -3,6 +3,7 @@ mod bootstrap;
 mod check;
 mod deps;
 mod env;
+mod fonts;
 mod git;
 mod hypr;
 mod paths;
@@ -234,6 +235,13 @@ fn enable(paths: &paths::Paths, args: &EnableArgs) -> anyhow::Result<()> {
     };
     let report = hypr::enable(paths)?;
     println!("opb enable: session wiring installed for pin @ {}", commit);
+    // The bar/menu icon glyphs come from the pin's own font; nothing else
+    // installs it on a raw system.
+    if fonts::install(paths)? == fonts::InstallOutcome::Installed {
+        println!(
+            "  installed omarchy icon font (restart the shell — `opb down` then `opb up` — to pick it up)"
+        );
+    }
     if report.legacy_conf_removed {
         println!("  removed stale managed opb.conf (hyprlang era)");
     }

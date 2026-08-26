@@ -69,6 +69,12 @@ impl Paths {
         self.data_root.join("opb")
     }
 
+    /// fontconfig's user font dir — `~/.local/share/fonts` (fontconfig's own
+    /// convention, not XDG; opb-installed fonts land here).
+    pub fn fonts_dir(&self) -> PathBuf {
+        self.home.join(".local/share/fonts")
+    }
+
     /// `…/opb/upstream` — one dir per pin + `current` link.
     pub fn upstream_dir(&self) -> PathBuf {
         self.opb_state_dir().join("upstream")

@@ -1,14 +1,20 @@
 //! `opb status` — minimal doctor over what opb owns: pin state, session
-//! wiring, shell process. No dependency probes (that is the bootstrap
-//! preflight) and no forensics on the user's system. One check framework,
-//! one rendering, one exit-code convention (0 = no FAIL rows).
+//! wiring, shell process, the icon font opb installs. No third-party
+//! dependency probes (that is the bootstrap preflight) and no forensics on the
+//! user's system. One check framework, one rendering, one exit-code
+//! convention (0 = no FAIL rows).
 
 use crate::check::{CheckResult, Report};
 use crate::paths::Paths;
 use crate::pin::{short, PinLock};
 
 pub fn report(paths: &Paths) -> Report {
-    Report(vec![pin_check(paths), wiring_check(paths), process_check(paths)])
+    Report(vec![
+        pin_check(paths),
+        wiring_check(paths),
+        process_check(paths),
+        font_check(),
+    ])
 }
 
 /// Bootstrapped? Is the recorded pin actually usable?
@@ -59,6 +65,12 @@ fn process_check(paths: &Paths) -> CheckResult {
     }
 }
 
+/// opb-owned wiring: the icon font `opb enable` installs. Warning, not a
+/// failure — a missing font degrades icons but keeps the shell functional.
+fn font_check() -> CheckResult {
+    crate::fonts::check(crate::fonts::probe_installed())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +107,7 @@ mod tests {
         let r = report(&paths);
         assert_eq!(status_of(&r, "pin"), "Info");
         assert_eq!(r.exit_code(), 0);
-        assert_eq!(r.0.len(), 3, "exactly pin + wiring + process rows");
+        assert_eq!(r.0.len(), 4, "exactly pin + wiring + process + font rows");
     }
 
     #[test]
