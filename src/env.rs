@@ -29,6 +29,17 @@ fn prepend_bin(pin_dir: &Path, current_path: &str) -> String {
         .unwrap_or_else(|_| pin_dir.join("bin").to_string_lossy().into_owned())
 }
 
+/// The shell fragment spelling the same contract as [`build`]: env exports
+/// ending in `;`, ready to prefix an `exec …` inside a `sh -c '…'`. Used by
+/// the keys.lua writer; the Lua twin lives in hypr's `opb_exec` (keep in
+/// sync — same exports, same order).
+pub fn shell_exports(pin_dir: &Path) -> String {
+    format!(
+        "export OMARCHY_PATH=\"{pin}\"; export PATH=\"{pin}/bin:$PATH\";",
+        pin = pin_dir.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

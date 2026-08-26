@@ -14,7 +14,6 @@
 //! (the only channel today) always resolve exactly.
 
 use anyhow::{bail, Context, Result};
-use std::io::Write;
 use std::path::Path;
 
 use crate::atomic;
@@ -71,7 +70,7 @@ fn plan_from(paths: &Paths, requested: Option<&str>, remote: &str) -> Result<Upd
 
     let scratch = paths
         .upstream_dir()
-        .join(format!(".update-tmp{}", std::process::id()));
+        .join(format!("{}{}", crate::paths::SCRATCH_UPDATE, std::process::id()));
     std::fs::create_dir_all(&scratch)
         .with_context(|| format!("create {}", scratch.display()))?;
     let result = build_plan(&scratch, &lock.reference, &reference, remote);
@@ -189,14 +188,14 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
     // the pin moves.
     let report = crate::deps::dependency_checks();
     print!("{}", report.render());
-    if report.exit_code() >= exit_fail() {
+    if report.exit_code() >= super::exit::FAIL {
         bail!("dependency checks failed — resolve them before updating");
     }
 
     // Fresh clone, validated in tmp before it can become the active pin.
     let tmp = paths
         .upstream_dir()
-        .join(format!(".clone-tmp{}", std::process::id()));
+        .join(format!("{}{}", crate::paths::SCRATCH_CLONE, std::process::id()));
     git::clone_shallow(git::REMOTE, &plan.reference, &tmp)?;
     let commit_result = (|| -> Result<String> {
         let commit = git::rev_parse_head(&tmp)?;
@@ -343,25 +342,11 @@ fn install_clone(tmp: &Path, new_pin_dir: &Path) -> Result<()> {
         .with_context(|| format!("move clone to {}", new_pin_dir.display()))
 }
 
-fn exit_fail() -> u8 {
-    1
-}
-
-
 fn confirm_msg(prompt: &str, yes: bool) -> Result<()> {
-    if yes {
+    if yes || super::prompt::confirm(prompt, false) {
         return Ok(());
     }
-    println!("{prompt} [y/N]");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        bail!("aborted (no confirmation)");
-    }
-    match line.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => Ok(()),
-        _ => bail!("aborted by user"),
-    }
+    bail!("aborted by user")
 }
 
 /// Down-window reconciliation step. Missing shell.json (deleted by hand?)

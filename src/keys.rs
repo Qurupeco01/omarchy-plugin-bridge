@@ -464,9 +464,8 @@ pub fn live_binds() -> Option<Vec<LiveBind>> {
 /// if the fragment ever contained `]]`.
 pub fn render_entry(pin_dir: &std::path::Path, action: &Action, combo: &Combo) -> String {
     let inner = format!(
-        "export OMARCHY_PATH=\"{}\"; export PATH=\"{}/bin:$PATH\"; exec {}",
-        pin_dir.display(),
-        pin_dir.display(),
+        "{} exec {}",
+        crate::env::shell_exports(pin_dir),
         action.invocation,
     );
     let cmd = format!("sh -c '{}'", inner);
@@ -578,16 +577,6 @@ pub fn action_already_bound(keys_lua_src: &str, action_id: &str) -> bool {
         || keys_lua_src.contains(&format!("-- opb: {action_id} |"))
 }
 
-/// Interactive [y/N] confirmation (default no — shadowing is destructive).
-fn confirm(question: &str) -> bool {
-    use std::io::Write;
-    print!("{question} [y/N] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
 /// Shared write path for `keys set` and the interactive binder: parse,
 /// collision-check, duplicate-check, atomic append. An occupied combo
 /// shadows only after an explicit confirm — shadowing is destructive.
@@ -608,7 +597,7 @@ pub fn write_binding(
                  shadows it by definition order",
                 combo.to_lua_string()
             );
-            if !confirm("Bind anyway (your bind wins)?") {
+            if !crate::prompt::confirm("Bind anyway (your bind wins)?", false) {
                 anyhow::bail!("occupied combo — nothing written");
             }
         }
@@ -641,14 +630,8 @@ pub fn write_binding(
 /// Reload prompt shared by both writers. Returns whether a reload ran.
 fn maybe_reload(yes: bool) -> bool {
     let do_reload = yes
-        || (std::io::IsTerminal::is_terminal(&std::io::stdin()) && {
-            use std::io::Write;
-            print!("Run `hyprctl reload` now? [Y/n] ");
-            std::io::stdout().flush().ok();
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).ok();
-            !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
-        });
+        || (std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && crate::prompt::confirm("Run `hyprctl reload` now?", true));
     if !do_reload {
         println!("run `hyprctl reload` when ready");
         return false;

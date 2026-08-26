@@ -6,7 +6,7 @@
 //! session integration is opt-in via `opb enable`.
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::atomic;
 use crate::git;
@@ -34,7 +34,7 @@ pub fn require_dependencies() -> Result<()> {
 }
 
 pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
-    if let Some((commit, pin_dir)) = current_pin(paths)? {
+    if let Some((commit, pin_dir)) = pin::active_pin(paths)? {
         return if opts.redo {
             regenerate(paths, &commit, &pin_dir)
         } else {
@@ -61,7 +61,7 @@ pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
     // final pin dir (D9: `omarchy@<commit>`, immutable).
     let tmp = paths
         .upstream_dir()
-        .join(format!(".clone-tmp{}", std::process::id()));
+        .join(format!("{}{}", crate::paths::SCRATCH_CLONE, std::process::id()));
     let result = (|| -> Result<()> {
         git::clone_shallow(git::REMOTE, &reference, &tmp)?;
         let commit = git::rev_parse_head(&tmp)?;
@@ -92,28 +92,6 @@ pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
         }
     }
     result
-}
-
-/// The active pin: prefer the lock file, else derive from the `current` link
-/// (covers a lock-less but linked state). Shared with `opb enable/disable`.
-pub(crate) fn current_pin(paths: &Paths) -> Result<Option<(String, PathBuf)>> {
-    if let Some(lock) = PinLock::load(paths)? {
-        return Ok(Some((lock.commit.clone(), paths.pin_dir(&lock.commit))));
-    }
-    match std::fs::read_link(paths.current_dir()) {
-        Ok(target) => {
-            let name = target
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let commit = name
-                .strip_prefix(crate::paths::PIN_DIRNAME_PREFIX)
-                .unwrap_or(&name)
-                .to_owned();
-            Ok(Some((commit, target)))
-        }
-        Err(_) => Ok(None),
-    }
 }
 
 /// `--redo`: regenerate shell.json against the existing pin. opb.lua, when
@@ -164,6 +142,7 @@ pub(crate) fn ensure_pin_usable(pin_dir: &Path, commit: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     fn home() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -246,29 +225,5 @@ mod tests {
             .unwrap();
 
         assert!(run(&paths, &BootstrapOptions { reference: None, redo: true }).is_err());
-    }
-
-    #[test]
-    fn current_pin_prefers_lock_over_link() {
-        let dir = home();
-        let paths = Paths::new(dir.path().to_path_buf());
-        let (commit, pin_dir) = fake_pin(dir.path());
-        PinLock::stable("v4.0.0", &commit).save(&paths).unwrap();
-        atomic::symlink_flip(&pin_dir, &paths.current_dir()).unwrap();
-
-        let (got, dir) = current_pin(&paths).unwrap().unwrap();
-        assert_eq!(got, commit);
-        assert_eq!(dir, paths.pin_dir(&commit));
-    }
-
-    #[test]
-    fn current_pin_derives_commit_from_link_without_lock() {
-        let dir = home();
-        let paths = Paths::new(dir.path().to_path_buf());
-        let (commit, pin_dir) = fake_pin(dir.path());
-        atomic::symlink_flip(&pin_dir, &paths.current_dir()).unwrap();
-
-        let (got, _) = current_pin(&paths).unwrap().unwrap();
-        assert_eq!(got, commit);
     }
 }

@@ -118,12 +118,7 @@ fn place(paths: &Paths, id: &str, section: &str) -> Result<()> {
 
 /// After a successful placement, Enter keeps placing (default yes).
 fn again() -> bool {
-    use std::io::Write;
-    print!("Place another? [Y/n] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+    crate::prompt::confirm("Place another?", true)
 }
 
 #[cfg(test)]

@@ -85,14 +85,35 @@ impl PinLock {
     }
 }
 
-/// Resolve the active pin: the `current` symlink target. Errors when not
-/// bootstrapped.
-pub fn active_dir(paths: &Paths) -> Result<PathBuf> {
-    let current = paths.current_dir();
-    if !current.is_symlink() {
-        bail!("not bootstrapped — run `opb bootstrap` first");
+/// The active pin: lock-preferred, falling back to deriving from the
+/// `current` link name (covers a lock-less but linked state). The single
+/// resolution path for every command.
+pub fn active_pin(paths: &Paths) -> Result<Option<(String, PathBuf)>> {
+    if let Some(lock) = PinLock::load(paths)? {
+        return Ok(Some((lock.commit.clone(), paths.pin_dir(&lock.commit))));
     }
-    std::fs::read_link(&current).context("read current link")
+    match std::fs::read_link(paths.current_dir()) {
+        Ok(target) => {
+            let name = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let commit = name
+                .strip_prefix(crate::paths::PIN_DIRNAME_PREFIX)
+                .unwrap_or(&name)
+                .to_owned();
+            Ok(Some((commit, target)))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Resolved active pin dir. Errors when not bootstrapped.
+pub fn active_dir(paths: &Paths) -> Result<PathBuf> {
+    match active_pin(paths)? {
+        Some((_, dir)) => Ok(dir),
+        None => bail!("not bootstrapped — run `opb bootstrap` first"),
+    }
 }
 
 /// Abbreviated commit sha for display (8 chars).
@@ -218,6 +239,46 @@ mod tests {
         assert!(ensure_floor("4.0.0.alpha").is_ok());
         assert!(ensure_floor("4.1.0").is_ok());
         assert!(ensure_floor("5.0.0").is_ok());
+    }
+
+    /// Pin dir + `current` link + lock (fixture for active_pin).
+    fn linked_fixture() -> (tempfile::TempDir, Paths, String) {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        let commit = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        let pin_dir = paths.pin_dir(commit);
+        fs::create_dir_all(&pin_dir).unwrap();
+        fs::write(pin_dir.join("version"), "4.0.0.alpha\n").unwrap();
+        atomic::symlink_flip(&pin_dir, &paths.current_dir()).unwrap();
+        (dir, paths, commit.to_owned())
+    }
+
+    #[test]
+    fn active_pin_prefers_lock_over_link() {
+        let (_d, paths, commit) = linked_fixture();
+        PinLock::stable("v4.0.0", &commit).save(&paths).unwrap();
+
+        let (got, dir) = active_pin(&paths).unwrap().unwrap();
+        assert_eq!(got, commit);
+        assert_eq!(dir, paths.pin_dir(&commit));
+    }
+
+    #[test]
+    fn active_pin_derives_commit_from_link_without_lock() {
+        let (_d, paths, commit) = linked_fixture();
+
+        let (got, dir) = active_pin(&paths).unwrap().unwrap();
+        assert_eq!(got, commit);
+        assert_eq!(dir, paths.pin_dir(&commit));
+    }
+
+    #[test]
+    fn active_pin_is_none_unbootstrapped_and_active_dir_bails() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        assert!(active_pin(&paths).unwrap().is_none());
+        assert!(active_dir(&paths).is_err());
     }
 
     #[test]

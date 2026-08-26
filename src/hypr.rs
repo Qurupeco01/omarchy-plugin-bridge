@@ -40,6 +40,8 @@ local function opb_quote(s)
 end
 
 local function opb_exec(cmd)
+  -- Lua-side twin of env::shell_exports (same contract, keep in sync):
+  -- export OMARCHY_PATH, prepend pin/bin to PATH, exec.
   local inner = "export OMARCHY_PATH=" .. opb_quote(OPB_PIN)
     .. "; export PATH=" .. opb_quote(OPB_PIN .. "/bin:$PATH")
     .. "; exec " .. cmd

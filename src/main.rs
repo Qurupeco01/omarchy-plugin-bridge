@@ -10,6 +10,7 @@ mod pin;
 mod plugin;
 mod plugin_list;
 mod plugin_place;
+mod prompt;
 mod shell;
 mod shelljson;
 mod status;
@@ -151,7 +152,7 @@ enum KeysCommand {
 /// pin (D15), then handle the activation line: write it as a marker-managed
 /// block on consent, or print it for manual pasting.
 fn enable(paths: &paths::Paths, args: &EnableArgs) -> anyhow::Result<()> {
-    let Some((commit, _pin_dir)) = bootstrap::current_pin(paths)? else {
+    let Some((commit, _pin_dir)) = pin::active_pin(paths)? else {
         anyhow::bail!("not bootstrapped yet — run `opb bootstrap` first");
     };
     let report = hypr::enable(paths)?;
@@ -170,11 +171,14 @@ fn enable(paths: &paths::Paths, args: &EnableArgs) -> anyhow::Result<()> {
     }
     let write = args.yes
         || (std::io::IsTerminal::is_terminal(&std::io::stdin())
-            && prompt_default_yes(&format!(
-                "Add {} to {}",
-                hypr::require_hint(),
-                hyprland_lua.display()
-            )));
+            && prompt::confirm(
+                &format!(
+                    "Add {} to {}",
+                    hypr::require_hint(),
+                    hyprland_lua.display()
+                ),
+                true,
+            ));
     if write {
         if hypr::write_require_block(paths)? {
             println!("  added managed activation block to {}", hyprland_lua.display());
@@ -195,16 +199,6 @@ fn enable(paths: &paths::Paths, args: &EnableArgs) -> anyhow::Result<()> {
 fn print_require_hint(hyprland_lua: &std::path::Path) {
     println!("  activate by adding this line to {}:", hyprland_lua.display());
     println!("    {}", hypr::require_hint());
-}
-
-/// [Y/n] prompt — Enter means yes. Only called on a TTY.
-fn prompt_default_yes(question: &str) -> bool {
-    use std::io::Write;
-    print!("{question} [Y/n] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
 /// `opb disable` — remove the managed wiring: activation block, opb.lua, and

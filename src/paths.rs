@@ -17,6 +17,12 @@ use std::path::PathBuf;
 /// First-party plugin namespace is reserved upstream; the pin dir is the
 /// only place opb keeps upstream code.
 pub const PIN_DIRNAME_PREFIX: &str = "omarchy@";
+
+/// Transient clone dir inside upstream/: `.clone-tmp<pid>` (bootstrap and
+/// update clones). Never a pin; safe to delete when no opb run is active.
+pub const SCRATCH_CLONE: &str = ".clone-tmp";
+/// Transient update-plan dir inside upstream/: `.update-tmp<pid>`.
+pub const SCRATCH_UPDATE: &str = ".update-tmp";
 /// Symlink inside `upstream/` that points at the active pin (D9).
 pub const CURRENT_LINK: &str = "current";
 pub const LOCK_FILENAME: &str = "upstream.lock";
