@@ -8,14 +8,15 @@ mod git;
 mod hypr;
 mod paths;
 mod pin;
+mod pin_update;
 mod plugin;
 mod plugin_edit;
 mod plugin_list;
 mod prompt;
+mod selfupdate;
 mod shell;
 mod shelljson;
 mod status;
-mod update;
 
 use clap::{Args, Parser, Subcommand};
 use std::process::ExitCode;
@@ -65,8 +66,13 @@ enum Command {
         #[command(subcommand)]
         command: Option<PluginCommand>,
     },
-    /// Update the upstream pin (preview → confirm → flip, with down-window
-    /// shell.json reconciliation)
+    /// Manage the upstream pin — update flips to a newer release, rollback
+    /// undoes the last flip
+    Pin {
+        #[command(subcommand)]
+        command: PinCommand,
+    },
+    /// Update the opb binary itself from the newest GitHub release
     Update(UpdateArgs),
 }
 
@@ -103,23 +109,44 @@ struct DisableArgs {
 
 #[derive(Args)]
 struct UpdateArgs {
-    #[command(subcommand)]
-    command: Option<UpdateCommand>,
-    /// Target ref to pin (a release tag); defaults to the newest tag
-    #[arg(long = "ref", value_name = "REF", global = true)]
-    reference: Option<String>,
-    /// First-party id renamed upstream, as OLD=NEW (repeatable)
-    #[arg(long = "rename", value_name = "OLD=NEW", global = true)]
-    renames: Vec<String>,
     /// Skip the confirmation prompt
-    #[arg(long, global = true)]
+    #[arg(long)]
     yes: bool,
+    /// Report whether a newer release exists without downloading it
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Subcommand)]
-enum UpdateCommand {
+enum PinCommand {
+    /// Preview → confirm → flip to a newer pin (fresh validated clone,
+    /// symlink flip, down-window shell.json reconciliation)
+    Update(PinUpdateArgs),
     /// Flip back to the previous pin generation
-    Rollback,
+    Rollback(PinRollbackArgs),
+}
+
+#[derive(Args)]
+struct PinUpdateArgs {
+    /// Target ref to pin (a release tag); defaults to the newest tag
+    #[arg(long = "ref", value_name = "REF")]
+    reference: Option<String>,
+    /// First-party id renamed upstream, as OLD=NEW (repeatable)
+    #[arg(long = "rename", value_name = "OLD=NEW")]
+    renames: Vec<String>,
+    /// Skip the confirmation prompt
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+struct PinRollbackArgs {
+    /// First-party id renamed upstream, as OLD=NEW (repeatable)
+    #[arg(long = "rename", value_name = "OLD=NEW")]
+    renames: Vec<String>,
+    /// Skip the confirmation prompt
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -437,7 +464,7 @@ fn main() -> ExitCode {
         }
         Command::Status => {
             let paths = paths::Paths::from_env();
-            let report = status::report(&paths);
+            let report = status::report_with(&paths, status::opb_version_probe);
             print!("{}", report.render());
             ExitCode::from(report.exit_code())
         }
@@ -474,33 +501,69 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Update(args) => {
+        Command::Pin { command } => {
             let paths = paths::Paths::from_env();
-            let renames = match args
-                .renames
-                .iter()
-                .map(|r| update::parse_rename(r))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("opb update: {e:#}");
-                    return ExitCode::from(exit::FAIL);
+            let (label, result) = match command {
+                PinCommand::Update(args) => {
+                    let renames = match args
+                        .renames
+                        .iter()
+                        .map(|r| pin_update::parse_rename(r))
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("opb pin update: {e:#}");
+                            return ExitCode::from(exit::FAIL);
+                        }
+                    };
+                    (
+                        "opb pin update",
+                        pin_update::run(
+                            &paths,
+                            &pin_update::UpdateOptions {
+                                reference: args.reference,
+                                renames,
+                                yes: args.yes,
+                            },
+                        ),
+                    )
+                }
+                PinCommand::Rollback(args) => {
+                    let renames = match args
+                        .renames
+                        .iter()
+                        .map(|r| pin_update::parse_rename(r))
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("opb pin rollback: {e:#}");
+                            return ExitCode::from(exit::FAIL);
+                        }
+                    };
+                    (
+                        "opb pin rollback",
+                        pin_update::rollback(
+                            &paths,
+                            &pin_update::RollbackOptions { renames, yes: args.yes },
+                        ),
+                    )
                 }
             };
-            let result = match args.command {
-                Some(UpdateCommand::Rollback) => update::rollback(
-                    &paths,
-                    &update::RollbackOptions { renames, yes: args.yes },
-                ),
-                None => update::run(
-                    &paths,
-                    &update::UpdateOptions {
-                        reference: args.reference,
-                        renames,
-                        yes: args.yes,
-                    },
-                ),
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{label}: {e:#}");
+                    ExitCode::from(exit::FAIL)
+                }
+            }
+        }
+        Command::Update(args) => {
+            let result = if args.check {
+                selfupdate::check()
+            } else {
+                selfupdate::run(args.yes)
             };
             match result {
                 Ok(()) => ExitCode::SUCCESS,

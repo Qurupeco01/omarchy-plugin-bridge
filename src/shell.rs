@@ -25,7 +25,7 @@ pub fn shell_dir(paths: &Paths) -> Result<PathBuf> {
 }
 
 /// Whether any shell process for the current pin is running. Used by
-/// `opb update` to decide whether the down-window needs a `down`/`up` pair.
+/// `opb pin update` to decide whether the down-window needs a `down`/`up` pair.
 pub fn is_running(paths: &Paths) -> bool {
     match shell_dir(paths) {
         Ok(dir) => !shell_pids(&dir).unwrap_or_default().is_empty(),

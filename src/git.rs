@@ -3,7 +3,8 @@
 use anyhow::{bail, Context, Result};
 use semver::Version;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Upstream repository (CONCEPT §1). Phases never embed a second URL.
 pub const REMOTE: &str = "https://github.com/basecamp/omarchy";
@@ -52,17 +53,46 @@ pub fn rev_parse_head(dir: &Path) -> Result<String> {
 /// Highest semver release tag reachable on the remote, resolved by
 /// `git ls-remote --tags` (no clone). Pure parse separated for testing.
 pub fn latest_tag(url: &str) -> Result<String> {
-    let out = Command::new("git")
+    parse_latest_tag(&ls_remote(url, None)?)
+}
+
+/// `latest_tag` under a deadline — the opb self-update probe must not hang
+/// `opb status` on a blackholed network, so the child is killed on expiry.
+pub fn latest_tag_timeout(url: &str, timeout: Duration) -> Result<String> {
+    parse_latest_tag(&ls_remote(url, Some(timeout))?)
+}
+
+/// Run `git ls-remote --tags <url>`, optionally killing the child past a
+/// deadline, and return the raw output on success.
+fn ls_remote(url: &str, timeout: Option<Duration>) -> Result<String> {
+    let mut child = Command::new("git")
         .args(["ls-remote", "--tags", url])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("spawn git ls-remote --tags")?;
+    if let Some(t) = timeout {
+        let deadline = Instant::now() + t;
+        loop {
+            if child.try_wait().context("wait for git ls-remote")?.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("git ls-remote timed out after {t:?} — cannot reach {url}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let out = child.wait_with_output().context("read git ls-remote output")?;
     if !out.status.success() {
         bail!(
             "git ls-remote failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    parse_latest_tag(&String::from_utf8_lossy(&out.stdout))
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Parse `ls-remote --tags` output (one `sha<TAB>refs/tags/<name>` per line,

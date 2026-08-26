@@ -8,7 +8,7 @@ Omarchy ships a first-class shell: bar, panels, notifications, launcher, plugin 
 
 ## How it works
 
-- **Upstream version pinned** — clones upstream at a release tag; updates swap an immutable checkout via symlink flip; `opb update rollback` undoes any bump instantly. Using source for simplicity, planning to support a package manager in the future.
+- **Upstream version pinned** — clones upstream at a release tag; updates swap an immutable checkout via symlink flip; `opb pin rollback` undoes any bump instantly. Using source for simplicity, planning to support a package manager in the future.
 - **Bridge, there is no reimplementation of shell** — no QML here; plugins and shell operations delegate to upstream's own tools at the pinned version.
 - **Upstream writes its own state** — after bootstrap, every plugin mutation flows through upstream over IPC; opb touches `shell.json` only in the update down-window.
 - **Minimal invasiveness** — zero keybinds by default, all-off shell, empty bar by default, marker-scoped artifacts you can delete by hand. Just touches a single line in `~/.config/hypr/hyprland.lua` to wire autostart, and only with your consent.
@@ -69,8 +69,9 @@ opb keys edit          # bind shell actions (binds live on the next `opb up`)
 | `opb disable [--now]` | Remove session wiring (`keys.lua` stays yours) |
 | `opb up` / `opb down` | Start / stop the shell **now** — `up` also registers keybinds and starts the reload keeper, `down` removes both |
 | `opb status` | Dependencies, pin state, generations, channel distance — start here when anything looks off |
-| `opb update [--ref TAG] [--rename OLD=NEW]` | Preview → confirm → flip to a newer pin, reconciling `shell.json` |
-| `opb update rollback` | Flip back one generation |
+| `opb update [--check] [--yes]` | Update the opb binary itself from the newest GitHub release; `--check` reports without downloading |
+| `opb pin update [--ref TAG] [--rename OLD=NEW]` | Preview → confirm → flip to a newer pin, reconciling `shell.json` |
+| `opb pin rollback` | Flip back one generation |
 | `opb plugin add URL [\--yes]` | Install a third-party plugin (upstream's flow) |
 | `opb plugin enable/disable ID` | Toggle components (upstream IPC; conflicts between running apps are not analyzed — that's yours) |
 | `opb plugin list` | Read-only x-ray: manifests × storage rules, works headless |
@@ -81,9 +82,19 @@ opb keys edit          # bind shell actions (binds live on the next `opb up`)
 
 ## Updating
 
+Two independent things can change:
+
 ```sh
-opb update             # preview first, nothing happens until you confirm
+opb update             # update opb itself from the newest GitHub release
+opb pin update         # preview → confirm → move the upstream pin
+opb pin rollback       # flip back one generation
 ```
+
+`opb update` replaces the running binary with the newest release: download,
+sha256-verified against the published checksum, then an atomic swap (safe
+while running — the old process keeps its inode). `opb status` warns when a
+newer release exists. AUR installs refuse to self-update — update those via
+the package manager.
 
 Pin bumps never patch the checkout: a fresh clone is validated, the symlink flips, and first-party ids are reconciled against the new release (renames need explicit `--rename old=new`). The previous generation stays on disk for `rollback`. Upstream migrations never run on your machine — package-level requirements surface in `opb status` instead.
 

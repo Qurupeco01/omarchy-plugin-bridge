@@ -7,6 +7,7 @@
 use crate::check::{CheckResult, Report};
 use crate::paths::Paths;
 use crate::pin::{short, PinLock};
+use crate::selfupdate::{self, Release};
 
 pub fn report(paths: &Paths) -> Report {
     Report(vec![
@@ -15,6 +16,37 @@ pub fn report(paths: &Paths) -> Report {
         process_check(paths),
         font_check(),
     ])
+}
+
+/// CLI entry — `report` plus an online probe for a newer opb release. The
+/// probe is injected so tests can stub the network.
+pub fn report_with(paths: &Paths, probe: impl FnOnce() -> CheckResult) -> Report {
+    let mut rows = report(paths).0;
+    rows.insert(1, probe());
+    Report(rows)
+}
+
+/// Online probe used by the CLI: warns when a newer opb release exists.
+/// `selfupdate::remote_release` errors (offline, timeout) map to an
+/// informational row — status must never fail because of the network.
+pub fn opb_version_probe() -> CheckResult {
+    version_check_row(&selfupdate::remote_release(selfupdate::PROBE_TIMEOUT))
+}
+
+/// Pure mapping of the probe result to a status row (tested directly).
+fn version_check_row(result: &anyhow::Result<Option<Release>>) -> CheckResult {
+    match result {
+        Ok(Some(r)) => CheckResult::warn(
+            "opb version",
+            format!(
+                "{} — {} available, run `opb update`",
+                selfupdate::current_version(),
+                r.version
+            ),
+        ),
+        Ok(None) => CheckResult::pass_info("opb version", selfupdate::current_version()),
+        Err(_) => CheckResult::info("opb version", selfupdate::current_version()),
+    }
 }
 
 /// Bootstrapped? Is the recorded pin actually usable?
@@ -139,5 +171,39 @@ mod tests {
         let r = report(&paths);
         assert_eq!(status_of(&r, "session wiring"), "Warn");
         assert_eq!(r.exit_code(), 0, "not activated is a warning, not a failure");
+    }
+
+    #[test]
+    fn version_row_warns_on_newer_release() {
+        use crate::check::Status;
+        let r = version_check_row(&Ok(Some(Release {
+            tag: "v9.9.9".into(),
+            version: semver::Version::parse("9.9.9").unwrap(),
+        })));
+        assert!(matches!(r.status, Status::Warn(_)));
+    }
+
+    #[test]
+    fn version_row_passes_when_current() {
+        use crate::check::Status;
+        let r = version_check_row(&Ok(None));
+        assert!(matches!(r.status, Status::Pass(_)));
+    }
+
+    #[test]
+    fn version_row_is_info_when_probe_fails() {
+        use crate::check::Status;
+        let r = version_check_row(&Err(anyhow::anyhow!("offline")));
+        assert!(matches!(r.status, Status::Info(_)));
+    }
+
+    #[test]
+    fn report_with_inserts_version_row_after_pin() {
+        let (_d, paths) = fixture();
+        let r = report_with(&paths, || CheckResult::pass_info("opb version", "0.0.0"));
+        assert_eq!(r.0.len(), 5, "pin + opb version + wiring + process + font");
+        assert_eq!(r.0[0].name, "pin");
+        assert_eq!(r.0[1].name, "opb version");
+        assert_eq!(r.exit_code(), 0);
     }
 }

@@ -1,6 +1,6 @@
 //! `opb bootstrap` — clone + pin upstream, generate shell.json.
 //!
-//! Never moves an existing pin: that is `opb update`. Re-running reports the
+//! Never moves an existing pin: that is `opb pin update`. Re-running reports the
 //! current pin; `--redo` regenerates shell.json against the existing pin
 //! without re-cloning. Bootstrap writes **no** Hyprland wiring (D15) —
 //! session integration is opt-in via `opb enable`.
@@ -48,7 +48,7 @@ pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
                 short(&commit),
                 commit
             );
-            println!("  move the pin with `opb update` (Phase 4)");
+            println!("  move the pin with `opb pin update` (Phase 4)");
             println!("  re-generate generated artifacts with `opb bootstrap --redo`");
             Ok(())
         };
@@ -131,7 +131,7 @@ fn hyprless_success_message(paths: &Paths, reference: &str, commit: &str) {
 
 /// A pin is only usable if it carries the shell plugin tree — anything else
 /// means the ref resolved to a non-omarchy commit (or the dir was mangled) —
-/// and clears the quattro support floor (CONCEPT §8). Shared with `opb update`'s
+/// and clears the quattro support floor (CONCEPT §8). Shared with `opb pin update`'s
 /// pre-flip clone validation.
 pub(crate) fn ensure_pin_usable(pin_dir: &Path, commit: &str) -> Result<()> {
     let plugins = pin_dir.join("shell/plugins");

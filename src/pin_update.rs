@@ -1,4 +1,4 @@
-//! `opb update` planning core (Phase 4, C2) — what would change?
+//! `opb pin update` planning core (Phase 4, C2) — what would change?
 //!
 //! Resolves the update target (`--ref`, defaulting to the newest stable tag),
 //! fetches current + target refs into a scratch repo and produces a preview
@@ -107,10 +107,10 @@ fn build_plan(
     })
 }
 
-/// Human-readable preview for the confirm step of `opb update`.
+/// Human-readable preview for the confirm step of `opb pin update`.
 pub fn render_preview(plan: &UpdatePlan) -> String {
     let mut out = format!(
-        "opb update: {} -> {}",
+        "opb pin update: {} -> {}",
         plan.previous_reference, plan.reference
     );
     if plan.is_up_to_date() {
@@ -135,7 +135,7 @@ pub fn render_preview(plan: &UpdatePlan) -> String {
     out
 }
 
-/// `opb update` options (C4).
+/// `opb pin update` options (C4).
 #[derive(Debug, Default, Clone)]
 pub struct UpdateOptions {
     /// Target ref; `None` = newest stable tag.
@@ -147,7 +147,7 @@ pub struct UpdateOptions {
 pub yes: bool,
 }
 
-/// `opb update rollback` options.
+/// `opb pin update rollback` options.
 #[derive(Debug, Default, Clone)]
 pub struct RollbackOptions {
     /// Explicit id renames applied during down-window reconciliation.
@@ -231,17 +231,17 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
     if was_running {
         crate::shell::up(paths)?;
     } else {
-        println!("opb update: shell was not running — start with `opb up`");
+        println!("opb pin update: shell was not running — start with `opb up`");
     }
     println!(
-        "opb update: now pinned at {} ({}) — previous generation kept for rollback",
+        "opb pin update: now pinned at {} ({}) — previous generation kept for rollback",
         short(&commit),
         plan.reference
     );
     Ok(())
 }
 
-/// `opb update rollback` — flip back to the previous generation through the
+/// `opb pin update rollback` — flip back to the previous generation through the
 /// same down-window discipline as an update (including reconciliation against
 /// the restored pin's id set). The flip is symmetric: the generation we leave
 /// becomes the new previous, so a second rollback undoes it. Retention keeps
@@ -262,7 +262,7 @@ pub fn rollback(paths: &Paths, opts: &RollbackOptions) -> Result<()> {
         );
     }
     println!(
-        "opb update rollback: {} ({}) -> {} ({})",
+        "opb pin update rollback: {} ({}) -> {} ({})",
         short(&lock.commit),
         lock.reference,
         short(&prev.commit),
@@ -289,9 +289,9 @@ pub fn rollback(paths: &Paths, opts: &RollbackOptions) -> Result<()> {
     if was_running {
         crate::shell::up(paths)?;
     } else {
-        println!("opb update rollback: shell was not running — start with `opb up`");
+        println!("opb pin update rollback: shell was not running — start with `opb up`");
     }
-    println!("opb update rollback: now pinned at {} ({})", short(&prev.commit), prev.reference);
+    println!("opb pin update rollback: now pinned at {} ({})", short(&prev.commit), prev.reference);
     Ok(())
 }
 
@@ -324,7 +324,7 @@ pub fn prune_generations(paths: &Paths) -> Result<()> {
         std::fs::remove_dir_all(entry.path()).with_context(|| {
             format!("prune old generation {}", entry.path().display())
         })?;
-        println!("opb update: pruned old generation {commit}");
+        println!("opb pin update: pruned old generation {commit}");
     }
     Ok(())
 }
@@ -368,7 +368,7 @@ fn reconcile_shell_json(
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!(
-                "opb update: {} missing — regenerating all-off config",
+                "opb pin update: {} missing — regenerating all-off config",
                 paths.shell_json().display()
             );
             (
@@ -383,7 +383,7 @@ fn reconcile_shell_json(
         shelljson::render(&doc).as_bytes(),
     )?;
     if report.is_noop() {
-        println!("opb update: shell.json reconciled (no changes needed)");
+        println!("opb pin update: shell.json reconciled (no changes needed)");
     } else {
         println!("{}", render_report(&report));
     }
@@ -392,7 +392,7 @@ fn reconcile_shell_json(
 
 fn render_report(report: &shelljson::ReconcileReport) -> String {
     use std::fmt::Write;
-    let mut s = String::from("opb update: shell.json reconciled\n");
+    let mut s = String::from("opb pin update: shell.json reconciled\n");
     for (from, to) in &report.renamed {
         let _ = writeln!(s, "  renamed: {from} -> {to}");
     }
