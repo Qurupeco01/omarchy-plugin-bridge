@@ -1,4 +1,5 @@
-//! Phase 5 keybinds — the action catalog (`opb keys list`).
+//! Keybinds — the action catalog (`opb keys list`), the interactive binder
+//! (`opb keys`), and the non-interactive writer (`opb keys set`).
 //!
 //! The catalog is **derived at runtime from the pin** (ROADMAP C2): parse
 //! upstream's `default/hypr/bindings/*.lua` for shell-facing `o.bind` calls,
@@ -489,7 +490,7 @@ fn lua_escape(s: &str) -> String {
 }
 
 const KEYS_HEADER: &str = "\
--- opb keybinds (user-owned). Entries are added by `opb keys set`; hand-edit
+-- opb keybinds (user-owned). Entries are added by `opb keys`; hand-edit
 -- freely — opb appends, never rewrites existing lines.
 -- Loaded via ~/.config/hypr/opb.lua (require(\"opb\") in your Hyprland config).
 
@@ -587,36 +588,21 @@ fn confirm(question: &str) -> bool {
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// Outcome of one binding write attempt.
-#[derive(Debug, PartialEq)]
-pub enum BindOutcome {
-    Written,
-    /// Not written; reason is shown to the user by the caller.
-    Skipped(&'static str),
-}
-
-/// Shared write path for `keys set` and `keys import-suggested`: parse,
-/// collision-check, duplicate-check, atomic append.
-///
-/// `allow_shadow = true` (single-bind override) prompts/overrides on an
-/// occupied combo; `false` (bulk import) skips occupied combos loudly —
-/// a mass import must never silently shadow the user's binds.
+/// Shared write path for `keys set` and the interactive binder: parse,
+/// collision-check, duplicate-check, atomic append. An occupied combo
+/// shadows only after an explicit confirm — shadowing is destructive.
 pub fn write_binding(
     paths: &Paths,
     action: &Action,
     combo_input: &str,
     live: Option<&[LiveBind]>,
-    allow_shadow: bool,
-) -> Result<BindOutcome> {
+) -> Result<()> {
     let combo = parse_combo(combo_input)?;
 
     match live.map(|l| collision_with(&combo, l)) {
         None => println!("note: hyprctl unavailable — skipping live collision check"),
         Some(None) => {}
         Some(Some(hit)) => {
-            if !allow_shadow {
-                return Ok(BindOutcome::Skipped("combo already bound"));
-            }
             println!(
                 "WARNING: combo {} is already bound ({hit}) — your new bind \
                  shadows it by definition order",
@@ -649,8 +635,7 @@ pub fn write_binding(
     append_entry(
         paths,
         &render_entry(&paths.current_dir(), action, &combo),
-    )?;
-    Ok(BindOutcome::Written)
+    )
 }
 
 /// Reload prompt shared by both writers. Returns whether a reload ran.
@@ -696,194 +681,143 @@ pub fn set(paths: &Paths, action_id: &str, combo_input: &str, yes: bool) -> Resu
     }
 
     let live = live_binds();
-    match write_binding(paths, &entry.action, combo_input, live.as_deref(), true)? {
-        BindOutcome::Written => println!(
-            "bound {} → {}",
-            parse_combo(combo_input)?.to_lua_string(),
-            action_id
-        ),
-        BindOutcome::Skipped(reason) => anyhow::bail!("{reason} — nothing written"),
-    }
+    write_binding(paths, &entry.action, combo_input, live.as_deref())?;
+    println!(
+        "bound {} → {}",
+        parse_combo(combo_input)?.to_lua_string(),
+        action_id
+    );
     println!("  wrote {}", paths.keys_lua().display());
     maybe_reload(yes);
     Ok(())
 }
 
-// --- import-suggested (C4) ------------------------------------------------------
+// --- interactive binding (`opb keys`) ---------------------------------------------
 
-/// Pure: upstream-declared candidates worth offering — has a suggested combo,
-/// passes the plugin filter, not already bound in keys.lua.
-pub fn select_candidates<'a>(
+/// Pure: actions worth offering interactively — enabled components only,
+/// nothing already bound in keys.lua.
+pub fn selectable_entries<'a>(
     entries: &'a [Entry],
     existing_keys_lua: &str,
-    plugin_filter: Option<&str>,
 ) -> Vec<&'a Entry> {
     entries
         .iter()
-        .filter(|e| e.action.suggested_combo.is_some())
-        .filter(|e| {
-            plugin_filter
-                .is_none_or(|p| e.action.plugin == p || e.action.id == p)
-        })
+        .filter(|e| e.state != "off")
         .filter(|e| !action_already_bound(existing_keys_lua, &e.action.id))
         .collect()
 }
 
-fn truncate(s: &str, w: usize) -> String {
-    if s.chars().count() > w {
-        s.chars().take(w.saturating_sub(1)).collect::<String>() + "…"
-    } else {
-        s.to_owned()
+/// `opb keys` (no subcommand) — interactive binder: multi-select actions,
+/// then edit each suggested combo freely (or type one for derived actions).
+/// Occupied combos shadow only after an explicit confirm.
+pub fn interactive(paths: &Paths) -> Result<()> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        bail!("interactive keybinding needs a terminal — use `keys list` / `keys set` instead");
     }
-}
+    let theme = dialoguer::theme::ColorfulTheme::default();
 
-/// Render the candidate table (shared by the preview and the non-tty path).
-fn render_candidates(candidates: &[&Entry], live: Option<&[LiveBind]>) -> String {
-    let mut out = String::from("  COMBO                 ACTION                         STATE     CONFLICT\n");
-    for c in candidates {
-        let combo = c.action.suggested_combo.as_deref().unwrap_or("-");
-        let parsed = parse_combo(combo);
-        let hit = parsed
-            .as_ref()
-            .ok()
-            .and_then(|c| live.and_then(|l| collision_with(c, l)));
-        out.push_str(&format!(
-            "  {:<21} {:<31} {:<9} {}\n",
-            truncate(combo, 21),
-            truncate(&c.action.id, 31),
-            c.state,
-            hit.unwrap_or_else(|| "-".into()),
-        ));
-    }
-    out
-}
-
-/// `opb keys import-suggested [--plugin <id>] [--yes]` — opt-in bulk import
-/// of upstream's binding table as suggestions (CONCEPT §4 Keybind model).
-///
-/// Interactive: arrow-key multi-select (space toggles, enter confirms, ESC
-/// aborts). `--yes` accepts every candidate whose combo is free and skips
-/// occupied ones loudly — a bulk import never silently shadows anything.
-/// Non-interactive without `--yes`: renders the table read-only.
-pub fn import_suggested(paths: &Paths, plugin_filter: Option<&str>, yes: bool) -> Result<()> {
     let entries = catalog(paths)?;
     let existing = std::fs::read_to_string(paths.keys_lua()).unwrap_or_default();
-    let live = live_binds();
-    let candidates = select_candidates(&entries, &existing, plugin_filter);
-
-    if candidates.is_empty() {
-        println!("opb keys import-suggested: nothing to import");
-        println!("  (every upstream bind is already present, or no component matches)");
+    let selectable = selectable_entries(&entries, &existing);
+    if selectable.is_empty() {
+        println!("nothing to bind — every enabled action already has a bind");
         return Ok(());
     }
 
-    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
-    if !interactive && !yes {
-        println!("opb keys import-suggested: candidates (nothing written):");
-        print!("{}", render_candidates(&candidates, live.as_deref()));
-        println!("\nre-run from a terminal to select, or with --yes to accept all free combos");
-        return Ok(());
-    }
-
-    // Classify occupancy once up front.
-    enum Occupancy {
-        Free,
-        Occupied(String),
-    }
-    let classified: Vec<(&&Entry, Occupancy)> = candidates
+    let labels: Vec<String> = selectable
         .iter()
-        .map(|c| {
-            let occ = c
-                .action
-                .suggested_combo
-                .as_deref()
-                .and_then(|s| parse_combo(s).ok())
-                .and_then(|c| live.as_deref().and_then(|l| collision_with(&c, l)));
-            (
-                c,
-                match occ {
-                    Some(hit) => Occupancy::Occupied(hit),
-                    None => Occupancy::Free,
-                },
+        .map(|e| {
+            format!(
+                "{:<20} {}",
+                truncate_pad(e.action.suggested_combo.as_deref().unwrap_or("(derived)"), 20),
+                truncate_pad(&e.action.description, 40),
             )
         })
         .collect();
-
-    let chosen: Vec<usize> = if yes {
-        // Bulk accept: free combos only, never silent shadowing.
-        classified
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, o))| matches!(o, Occupancy::Free))
-            .map(|(i, _)| i)
-            .collect()
-    } else {
-        let labels: Vec<String> = classified
-            .iter()
-            .map(|(c, o)| {
-                let occ = match o {
-                    Occupancy::Free => String::new(),
-                    Occupancy::Occupied(by) => format!("  ⚠ occupies: {by}"),
-                };
-                format!(
-                    "{:<22} {:<30} [{}]",
-                    truncate(c.action.suggested_combo.as_deref().unwrap_or("-"), 22),
-                    truncate(&c.action.description, 30),
-                    c.action.plugin,
-                ) + &occ
-            })
-            .collect();
-        let selection = dialoguer::MultiSelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt("Import keybinds (↑↓ move · space toggles · a/all · enter confirms · esc aborts)")
-            .items_checked(&labels.iter().map(|l| (l.clone(), false)).collect::<Vec<_>>())
-            .report(false)
-            .interact_opt();
-        match selection {
-            Err(dialoguer::Error::IO(e)) if e.kind() == std::io::ErrorKind::Interrupted => Vec::new(),
-            Err(e) => return Err(anyhow::anyhow!("selection failed: {e}")),
-            Ok(None) => {
-                println!("aborted — nothing written");
-                return Ok(());
-            }
-            Ok(Some(idx)) => idx,
+    let chosen = match dialoguer::MultiSelect::with_theme(&theme)
+        .with_prompt("Bind actions (↑↓ move · space toggles · a/all · enter confirms · esc aborts)")
+        .items(&labels)
+        .report(false)
+        .interact_opt()
+    {
+        Err(dialoguer::Error::IO(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
+            return Ok(())
         }
+        Err(e) => return Err(anyhow::anyhow!("selection failed: {e}")),
+        Ok(None) => {
+            println!("aborted — nothing written");
+            return Ok(());
+        }
+        Ok(Some(idx)) if idx.is_empty() => {
+            println!("nothing selected — nothing written");
+            return Ok(());
+        }
+        Ok(Some(idx)) => idx,
     };
 
+    let live = live_binds();
     let mut written = 0usize;
-    for i in chosen {
-        let (c, _occ) = &classified[i];
-        // Bulk (--yes) mode never shadows; single selections may override
-        // explicitly through the normal confirm path.
-        let allow_shadow = !yes;
-        let combo = c.action.suggested_combo.as_deref().unwrap_or_default();
-        match write_binding(paths, &c.action, combo, live.as_deref(), allow_shadow)? {
-            BindOutcome::Written => {
+    for &i in &chosen {
+        let entry = selectable[i];
+        let combo_input = ask_combo(&theme, entry)?;
+        let Some(combo_input) = combo_input else {
+            println!("skipped {}", entry.action.id);
+            continue;
+        };
+        match write_binding(paths, &entry.action, &combo_input, live.as_deref()) {
+            Ok(()) => {
                 written += 1;
-                println!("bound {} → {}", combo, c.action.id);
+                println!("bound {combo_input} → {}", entry.action.id);
             }
-            BindOutcome::Skipped(reason) => {
-                println!("skipped {}: {reason}", c.action.id);
-            }
+            // A declined shadow or a duplicate stays per-action; real I/O
+            // errors surface the same way and the flow moves on.
+            Err(e) => println!("skipped {}: {:#}", entry.action.id, e),
         }
     }
 
-    let occupied = classified
-        .iter()
-        .filter(|(_, o)| matches!(o, Occupancy::Occupied(_)))
-        .count();
-    if occupied > 0 {
-        println!(
-            "{occupied} candidate(s) skipped: their upstream combo is already bound on this \
-             system — bind individually with `opb keys set <action> <combo>` if you want to shadow"
-        );
-    }
     if written > 0 {
-        println!("wrote {} entr{} to {}", written, if written == 1 { "y" } else { "ies" }, paths.keys_lua().display());
-        maybe_reload(yes);
+        println!(
+            "wrote {} entr{} to {}",
+            written,
+            if written == 1 { "y" } else { "ies" },
+            paths.keys_lua().display()
+        );
+        maybe_reload(false);
     } else {
         println!("nothing written");
     }
     Ok(())
+}
+
+/// One combo prompt, pre-filled with the suggested combo for editing. Empty
+/// input skips the action; invalid combos re-prompt. `None` = skipped.
+fn ask_combo(
+    theme: &dialoguer::theme::ColorfulTheme,
+    entry: &Entry,
+) -> Result<Option<String>> {
+    loop {
+        let mut input = dialoguer::Input::<String>::with_theme(theme)
+            .with_prompt(format!("Combo for {}", entry.action.id));
+        if let Some(suggested) = entry.action.suggested_combo.as_deref() {
+            input = input.with_initial_text(suggested.to_owned());
+        }
+        match input.interact_text() {
+            Ok(text) => {
+                let text = text.trim().to_owned();
+                if text.is_empty() {
+                    return Ok(None);
+                }
+                if parse_combo(&text).is_ok() {
+                    return Ok(Some(text));
+                }
+                println!("  invalid combo — upstream style, e.g. SUPER + CTRL + E or XF86AudioPlay");
+            }
+            Err(dialoguer::Error::IO(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
+                return Ok(None)
+            }
+            Err(e) => return Err(anyhow::anyhow!("combo input failed: {e}")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1163,31 +1097,27 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
     }
 
     #[test]
-    fn candidate_selection_filters_combo_plugin_and_already_bound() {
+    fn selectable_filters_disabled_and_already_bound() {
         let entries = vec![
             cand("a:toggle", "omarchy.a", Some("SUPER + A"), "on"),
             cand("b:toggle", "omarchy.b", Some("SUPER + B"), "off"),
-            // derived → no upstream combo → never a candidate
+            // derived → no upstream combo → still selectable, combo asked by hand
             cand("c:toggle", "omarchy.c", None, "on"),
         ];
         let existing = "-- opb: a:toggle | desc a\n";
 
-        let all = select_candidates(&entries, "", None);
+        let all = selectable_entries(&entries, "");
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].action.id, "a:toggle");
+        assert_eq!(all[1].action.id, "c:toggle");
 
-        let filtered = select_candidates(&entries, "", Some("omarchy.b"));
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].action.id, "b:toggle");
-
-        // Already bound → excluded.
-        assert!(select_candidates(&entries, existing, None)
-            .iter()
-            .all(|e| e.action.id != "a:toggle"));
+        // Disabled and already-bound are excluded.
+        let got = selectable_entries(&entries, existing);
+        assert!(got.iter().all(|e| e.action.id != "b:toggle"));
+        assert!(got.iter().all(|e| e.action.id != "a:toggle"));
     }
 
-    #[test]
-    fn write_binding_bulk_mode_never_shadows() {
+    fn fixture_paths() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let p = Paths::new(dir.path().to_path_buf());
         // Minimal fake pin — write_binding resolves it for env-wrapped execs.
@@ -1196,6 +1126,12 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
         std::fs::write(pin.join("version"), "4.0.0.alpha\n").unwrap();
         crate::atomic::symlink_flip(&pin, &p.current_dir()).unwrap();
         crate::pin::PinLock::stable("v4.0.0", "abc").save(&p).unwrap();
+        (dir, p)
+    }
+
+    #[test]
+    fn write_binding_occupied_combo_never_shadows_silently() {
+        let (_d, p) = fixture_paths();
 
         let action = Action {
             id: "x:toggle".into(),
@@ -1207,17 +1143,16 @@ o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop
         };
         let live = vec![LiveBind { modmask: MOD_SUPER, key: "Q".into(), keycode: 0 }];
 
-        // Bulk mode (allow_shadow=false): occupied combo skipped, nothing written.
-        let out = write_binding(&p, &action, "SUPER + q", Some(&live), false).unwrap();
-        assert_eq!(out, BindOutcome::Skipped("combo already bound"));
-        assert!(!p.keys_lua().exists(), "no file created on skip");
+        // Occupied combo: non-interactive stdin declines the shadow confirm —
+        // nothing is written.
+        assert!(write_binding(&p, &action, "SUPER + q", Some(&live)).is_err());
+        assert!(!p.keys_lua().exists(), "no file created on declined shadow");
 
-        // Free combo writes fine in the same mode.
-        let out = write_binding(&p, &action, "SUPER + Z", Some(&live), false).unwrap();
-        assert_eq!(out, BindOutcome::Written);
+        // Free combo writes fine.
+        write_binding(&p, &action, "SUPER + Z", Some(&live)).unwrap();
         assert!(p.keys_lua().exists());
 
         // Second attempt for the same action is refused outright.
-        assert!(write_binding(&p, &action, "SUPER + Y", Some(&live), false).is_err());
+        assert!(write_binding(&p, &action, "SUPER + Y", Some(&live)).is_err());
     }
 }

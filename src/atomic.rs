@@ -1,7 +1,7 @@
 //! Atomic filesystem effects: no half-written state ever lands on disk
 //! (tmp file + rename; ROADMAP Phase 2 invariant).
 //!
-//! File writes delegate the core to the battle-tested `atomicwrites` crate.
+//! File writes delegate the core to the well-maintained `atomicwrites` crate.
 //! opb adds the two things it lacks: parent-dir creation and a durability
 //! fsync of the destination directory after the rename. Symlink flips (D9) are
 //! plain std — no crate covers that, and it is only a handful of lines.

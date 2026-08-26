@@ -1,7 +1,7 @@
 mod atomic;
 mod bootstrap;
 mod check;
-mod checks;
+mod deps;
 mod env;
 mod git;
 mod hypr;
@@ -18,11 +18,8 @@ use clap::{Args, Parser, Subcommand};
 use std::process::ExitCode;
 
 mod exit {
-    #![allow(dead_code)] // ERROR consumed by stubs; OK/FAIL by report exits
-
     pub const OK: u8 = 0;
     pub const FAIL: u8 = 1;
-    pub const ERROR: u8 = 2;
 }
 
 mod keys;
@@ -52,12 +49,14 @@ enum Command {
     Up,
     /// Stop the shell
     Down,
-    /// Snapshot of dependencies, pin state, generations, and channel distance
+    /// Minimal doctor: pin state, session wiring, shell process
     Status,
-    /// Manage keybinds for shell/plugin actions (zero binds by default, D11)
+    /// Manage keybinds for shell/plugin actions (zero binds by default, D11).
+    /// Without a subcommand: interactive binder — pick actions, edit each
+    /// suggested combo freely
     Keys {
         #[command(subcommand)]
-        command: KeysCommand,
+        command: Option<KeysCommand>,
     },
     /// Manage plugins — acquire/activate/inspect; the single mutation path
     /// (passthrough to upstream, D13)
@@ -69,8 +68,6 @@ enum Command {
     /// Update the upstream pin (preview → confirm → flip, with down-window
     /// shell.json reconciliation)
     Update(UpdateArgs),
-    /// Delegate to upstream theme scripts
-    Theme,
 }
 
 #[derive(Args)]
@@ -147,22 +144,6 @@ enum KeysCommand {
         #[arg(long)]
         yes: bool,
     },
-    /// Bulk-import upstream's suggested binds (arrow-key selection; nothing
-    /// written without explicit consent)
-    ImportSuggested {
-        /// Only candidates for this component id
-        #[arg(long = "plugin", value_name = "ID")]
-        plugin: Option<String>,
-        /// Accept all free combos non-interactively (occupied ones are
-        /// skipped, never shadowed)
-        #[arg(long)]
-        yes: bool,
-    },
-}
-
-fn not_implemented(cmd: &str) -> ! {
-    eprintln!("opb {cmd}: not implemented yet");
-    std::process::exit(i32::from(exit::ERROR));
 }
 
 /// `opb enable` — install/regenerate the managed opb.lua against the active
@@ -256,7 +237,7 @@ fn main() -> ExitCode {
                 reference: args.reference,
                 redo: args.redo,
             };
-            match bootstrap::run(&paths, &opts) {
+            match bootstrap::require_dependencies().and_then(|()| bootstrap::run(&paths, &opts)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("opb bootstrap: {e:#}");
@@ -332,7 +313,14 @@ fn main() -> ExitCode {
         Command::Keys { command } => {
             let paths = paths::Paths::from_env();
             match command {
-                KeysCommand::List { all, plugin } => match keys::catalog(&paths) {
+                None => match keys::interactive(&paths) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("opb keys: {e:#}");
+                        ExitCode::from(exit::FAIL)
+                    }
+                },
+                Some(KeysCommand::List { all, plugin }) => match keys::catalog(&paths) {
                     Ok(entries) => {
                         print!("{}", keys::render(&entries, all, plugin.as_deref()));
                         ExitCode::SUCCESS
@@ -342,20 +330,11 @@ fn main() -> ExitCode {
                         ExitCode::from(exit::FAIL)
                     }
                 },
-                KeysCommand::Set { action, combo, yes } => {
+                Some(KeysCommand::Set { action, combo, yes }) => {
                     match keys::set(&paths, &action, &combo, yes) {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(e) => {
                             eprintln!("opb keys set: {e:#}");
-                            ExitCode::from(exit::FAIL)
-                        }
-                    }
-                }
-                KeysCommand::ImportSuggested { plugin, yes } => {
-                    match keys::import_suggested(&paths, plugin.as_deref(), yes) {
-                        Ok(()) => ExitCode::SUCCESS,
-                        Err(e) => {
-                            eprintln!("opb keys import-suggested: {e:#}");
                             ExitCode::from(exit::FAIL)
                         }
                     }
@@ -398,6 +377,5 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Theme => not_implemented("theme"),
     }
 }

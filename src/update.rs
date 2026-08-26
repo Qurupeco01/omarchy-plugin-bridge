@@ -187,7 +187,7 @@ pub fn run(paths: &Paths, opts: &UpdateOptions) -> Result<()> {
 
     // Dependency re-run gates the flip: a FAIL must stop the update before
     // the pin moves.
-    let report = crate::checks::dependency_checks();
+    let report = crate::deps::dependency_checks();
     print!("{}", report.render());
     if report.exit_code() >= exit_fail() {
         bail!("dependency checks failed — resolve them before updating");

@@ -21,6 +21,18 @@ pub struct BootstrapOptions {
     pub redo: bool,
 }
 
+/// Requirement gate: opb installs nothing on a machine that cannot run the
+/// result. Renders the failing checks and bails — we point at what's missing,
+/// we don't analyze or fix the user's system.
+pub fn require_dependencies() -> Result<()> {
+    let report = crate::deps::dependency_checks();
+    if report.exit_code() == super::exit::OK {
+        return Ok(());
+    }
+    print!("{}", report.render());
+    bail!("missing requirements — install them, then re-run `opb bootstrap`");
+}
+
 pub fn run(paths: &Paths, opts: &BootstrapOptions) -> Result<()> {
     if let Some((commit, pin_dir)) = current_pin(paths)? {
         return if opts.redo {

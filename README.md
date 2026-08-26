@@ -1,15 +1,33 @@
 # omarchy-plugin-bridge
 
-**`opb`** — run upstream [omarchy-shell](https://github.com/basecamp/omarchy) (Quickshell QML) on a raw Arch + Hyprland system, component by component, without an Omarchy install.
+**`opb`** is a project done to run upstream [omarchy-shell](https://github.com/basecamp/omarchy) (Quickshell QML) on a raw Arch + Hyprland system, component by component, without an Omarchy install, minimally invasive to your existing setup.
 
-Omarchy ships a first-class shell — bar, panels, notifications, launcher, plugin ecosystem — but assumes it owns your whole desktop. `opb` is a thin bridge for people who already have a Hyprland setup and want to opt in on their own terms.
+Note that this was developed for personal use and is provided as-is. I would love to hear about any feature requests or issues you encounter.
+
+Omarchy ships a first-class shell: bar, panels, notifications, launcher, plugin ecosystem, but assumes it owns your whole desktop. `opb` is a thin bridge for people who already have a Hyprland setup and want to opt in on their own terms.
 
 ## How it works
 
-- **Pinned, not forked** — clones upstream at a release tag; updates swap an immutable checkout via symlink flip; `opb update rollback` undoes any bump instantly
-- **Bridge, not reimplementation** — no QML here; plugins and shell operations delegate to upstream's own tools at the pinned version
-- **Upstream writes its own state** — after bootstrap, every plugin mutation flows through upstream over IPC; opb touches `shell.json` only in the update down-window
-- **Minimal invasiveness** — zero keybinds by default, all-off shell, marker-scoped artifacts you can delete by hand
+- **Upstream version pinned** — clones upstream at a release tag; updates swap an immutable checkout via symlink flip; `opb update rollback` undoes any bump instantly. Using source for simplicity, planning to support a package manager in the future.
+- **Bridge, there is no reimplementation of shell** — no QML here; plugins and shell operations delegate to upstream's own tools at the pinned version.
+- **Upstream writes its own state** — after bootstrap, every plugin mutation flows through upstream over IPC; opb touches `shell.json` only in the update down-window.
+- **Minimal invasiveness** — zero keybinds by default, all-off shell, empty bar by default, marker-scoped artifacts you can delete by hand. Just touches a single line in `~/.config/hypr/hyprland.lua` to wire autostart, and only with your consent.
+
+## Caveats / Next planned features
+
+Caveats today:
+
+- Upstream is pinned to **release tags only** — tracking `main` or arbitrary refs is not supported yet, as well as other channels cannot be used.
+- Currently only the default omarchy bar is supported through running the whole shell, so when you enable opb, the bar appears always on your screen. Individual plugin integration inside custom bars is not supported but planned, maybe this would require more manual setup.
+- `opb` installs only from source; packaging (AUR) is planned
+
+Planned / want to try:
+
+- Theme support aligned with upstream's theme system, expandable to user's quickshell theming maybe? I need to think a bit more about this
+- Launching *your own* quickshell configs integrating plugins inside them, not only the omarchy one: this would allow using individual plugins from the marketplace in your own setups. 
+- Related with previous point: installing plugins without cloning upstream, just having a thin translator.
+- Getting omarchy shell from AUR/pacman/main branch (as original allows with channels)
+- Waybar bridge (idk if this will be possible at all)
 
 ## Install
 
@@ -30,8 +48,6 @@ opb plugin list        # see what exists; everything starts off
 opb plugin enable omarchy.clock    # something appears on your bar
 opb keys import-suggested          # optional: pick suggested binds for what you enabled
 ```
-
-Reboot with `require("opb")` in place and the shell comes back on its own.
 
 ## Commands
 
@@ -60,4 +76,6 @@ Pin bumps never patch the checkout: a fresh clone is validated, the symlink flip
 
 ## Scope
 
-`opb` deliberately does **not**: analyze conflicts with other desktop apps, manage packages, or carry patches to upstream. If upstream's contract changes in ways the bridge can't absorb, the pin holds until it's resolved — safe by design.
+`opb` deliberately does **not**: analyze conflicts with other desktop apps, manage packages, or carry patches to upstream. If upstream's contract changes in ways the bridge can't absorb, the pin holds until it's resolved. 
+
+The aim for the tool is to stay minimal and practical. I hope you enjoy it!! :)
