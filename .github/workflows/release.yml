@@ -1,0 +1,45 @@
+name: release
+
+# Tag-driven release: build the linux x86_64 binary against an older glibc
+# (ubuntu-22.04) so it runs on Arch's newer glibc — forward-compatible only.
+# Asset naming follows cargo-binstall's default template
+# ({ name }-{ version }-{ target }.tar.gz) so `cargo binstall` picks it up.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="omarchy-plugin-bridge-${version}-x86_64-unknown-linux-gnu"
+          mkdir "dist/${name}"
+          cp target/x86_64-unknown-linux-gnu/release/opb "dist/${name}/"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+          (
+            cd dist
+            sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          )
+
+      - name: upload to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256

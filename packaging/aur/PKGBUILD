@@ -1,0 +1,32 @@
+# Maintainer: Qurupeco01 <https://github.com/Qurupeco01>
+# Ready to submit to AUR: after tagging v0.1.0, run `updpkgsums` against this
+# file, then push it to ssh://aur@aur.archlinux.org/omarchy-plugin-bridge.git
+# (needs an AUR account with an SSH key). Keep pkgver in sync with tags.
+pkgname=omarchy-plugin-bridge
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Run upstream omarchy-shell on a raw Arch + Hyprland system, component by component'
+arch=(x86_64)
+url='https://github.com/Qurupeco01/omarchy-plugin-bridge'
+license=(MIT)
+depends=(gcc-libs)
+makedepends=(cargo)
+source=("$url/archive/v$pkgver/$pkgname-$pkgver.tar.gz")
+b2sums=('SKIP') # TODO fill via updpkgsums once the v0.1.0 tag exists
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CARGO_TARGET_DIR=target
+  cargo build --release --locked
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  cargo test --release --locked
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/opb -t "$pkgdir/usr/bin/"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

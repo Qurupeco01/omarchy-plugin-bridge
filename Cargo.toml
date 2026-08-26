@@ -26,3 +26,8 @@ which = "8.0.5"
 
 [dev-dependencies]
 tempfile = "3.20.0"
+
+# Release binaries are distributed as-is — keep them small.
+[profile.release]
+strip = true
+lto = "thin"

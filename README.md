@@ -32,10 +32,21 @@ Planned / want to try:
 ## Install
 
 ```sh
+# prebuilt binary, no Rust toolchain needed (x86_64 Linux)
+curl -fsSL https://raw.githubusercontent.com/Qurupeco01/omarchy-plugin-bridge/main/install.sh | sh
+
+# or via cargo
+cargo install --git https://github.com/Qurupeco01/omarchy-plugin-bridge
+
+# or from a local clone, e.g. if you want to read the code first
 git clone https://github.com/Qurupeco01/omarchy-plugin-bridge.git
 cd omarchy-plugin-bridge
-cargo install --path .
+cargo install --path . --locked
 ```
+
+The curl script installs into `~/.local/bin`, cargo into `~/.cargo/bin` — make
+sure the target directory is on your `PATH`. Both are per-user installs.
+(AUR package: planned — see Caveats.)
 
 Requirements: Arch + Hyprland, `quickshell ≥ 0.3.1`, `hyprctl`, `git`. Run `opb status` to verify.
 
