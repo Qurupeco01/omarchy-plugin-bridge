@@ -29,7 +29,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           name="omarchy-plugin-bridge-${version}-x86_64-unknown-linux-gnu"
-          mkdir "dist/${name}"
+          mkdir -p "dist/${name}"
           cp target/x86_64-unknown-linux-gnu/release/opb "dist/${name}/"
           tar -czf "dist/${name}.tar.gz" -C dist "${name}"
           (
