@@ -1,6 +1,6 @@
 [package]
 name = "omarchy-plugin-bridge"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "opb — run upstream omarchy-shell on a raw Arch + Hyprland system, component by component"
 license = "MIT"
