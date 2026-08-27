@@ -90,11 +90,13 @@ pub(crate) fn is_placed_in_layout(doc: &Value, id: &str) -> bool {
     placed_section(doc, id).is_some()
 }
 
-/// Does `id` appear in `plugins[]`?
+/// Does `id` appear in `plugins[]`? Upstream writes the entry as an object
+/// (`{ "id": … }` — see PluginRegistry setEnabled), so both bare strings and
+/// objects are matched, mirroring [`layout_entry_id`].
 fn is_in_plugins(doc: &Value, id: &str) -> bool {
     doc.get("plugins")
         .and_then(|v| v.as_array())
-        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(id)))
+        .is_some_and(|a| a.iter().any(|e| layout_entry_id(e) == Some(id)))
 }
 
 // --- x-ray ------------------------------------------------------------------
@@ -292,10 +294,16 @@ mod tests {
         assert_eq!(state_of(&doc, &["bar-widget".into()], "omarchy.clock"), "off");
         doc["bar"]["layout"]["left"] = serde_json::json!(["omarchy.clock"]);
         assert_eq!(state_of(&doc, &["bar-widget".into()], "omarchy.clock"), "on");
-        // Third-party on via plugins[].
+        // Third-party on via plugins[] — bare string and the object form
+        // upstream actually writes (`{ "id": … }`) must both register.
         assert_eq!(state_of(&doc, &["panel".into()], "cool.panel"), "off");
         doc["plugins"] = serde_json::json!(["cool.panel"]);
         assert_eq!(state_of(&doc, &["panel".into()], "cool.panel"), "on");
+        doc["plugins"] = serde_json::json!([{ "id": "cool.panel", "path": "/x" }]);
+        assert_eq!(state_of(&doc, &["panel".into()], "cool.panel"), "on");
+        // A neighboring object must not be mistaken for our id.
+        doc["plugins"] = serde_json::json!([{ "id": "other.panel" }]);
+        assert_eq!(state_of(&doc, &["panel".into()], "cool.panel"), "off");
         // Bar kind is always active regardless of everything else.
         assert_eq!(state_of(&doc, &["bar".into()], "omarchy.bar"), "bar");
     }
@@ -357,6 +365,83 @@ mod tests {
         assert!(is_first_party("omarchy.lock"));
         assert!(!is_first_party("third.party"));
         assert!(!is_first_party("omarchish")); // prefix must be the full segment
+    }
+
+    /// The local plugin-development loop, headless. A developer authors a
+    /// plugin folder (manifest + entry point), drops it into
+    /// `~/.config/omarchy/plugins/<id>/`, and iterates: `opb plugin list`
+    /// shows it, `opb plugin enable` (upstream writes the `plugins[]` object
+    /// entry) flips it to on. This exercises the opb-owned read path of that
+    /// loop without a running shell.
+    #[test]
+    fn local_dev_loop_discover_and_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("pin");
+        // Minimal first-party bar so the generated shell.json is well-formed;
+        // the dev plugin is third-party under the user config.
+        let bar = pin.join("shell/plugins/bar");
+        std::fs::create_dir_all(&bar).unwrap();
+        std::fs::write(
+            bar.join("Bar.manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1, "id": "omarchy.bar", "kinds": ["bar"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let upstream = dir.path().join("data/opb/upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
+        std::os::unix::fs::symlink(&pin, upstream.join("current")).unwrap();
+        let paths = Paths::from_parts(
+            dir.path().join("home"),
+            dir.path().join("data"),
+            dir.path().join("home/.config"),
+        );
+
+        // 1) Author a plugin in a local checkout (schema-clean, third-party).
+        let checkout = dir.path().join("dev/acme.hello");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let manifest = serde_json::json!({
+            "schemaVersion": 1,
+            "id": "acme.hello",
+            "name": "Hello",
+            "version": "0.1.0",
+            "kinds": ["panel"],
+            "entryPoints": { "panel": "Hello.qml" },
+        });
+        std::fs::write(checkout.join("manifest.json"), serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        std::fs::write(checkout.join("Hello.qml"), "import QtQuick\n").unwrap();
+        // Not reserved, required fields present → the upstream validator would
+        // accept it (mirrors omarchy-plugin-validate's checks).
+        assert!(!is_first_party("acme.hello"));
+        for field in ["id", "name", "version", "kinds", "entryPoints"] {
+            assert!(manifest.get(field).is_some(), "missing {field}");
+        }
+
+        // 2) Install it into the user plugins dir — a copy (or symlink).
+        let installed = paths.omarchy_config_dir().join("plugins/acme.hello");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::rename(&checkout, &installed).unwrap();
+
+        // 3) Seed an all-off shell.json and inspect: discovered, user-owned, off.
+        std::fs::write(
+            paths.shell_json(),
+            crate::shelljson::render(&crate::shelljson::generate(&[])),
+        )
+        .unwrap();
+        let rows = list_rows(&paths).unwrap();
+        let row = rows.iter().find(|r| r.id == "acme.hello").expect("plugin discovered");
+        assert_eq!((row.origin, row.state), ("user", "off"));
+        assert_eq!(row.kind, "panel");
+
+        // 4) The shell enables it: it writes the `plugins[]` object entry.
+        let mut doc = load_doc(&paths).unwrap();
+        doc["plugins"] = serde_json::json!([{ "id": "acme.hello" }]);
+        std::fs::write(paths.shell_json(), crate::shelljson::render(&doc)).unwrap();
+        let rows = list_rows(&paths).unwrap();
+        let row = rows.iter().find(|r| r.id == "acme.hello").unwrap();
+        assert_eq!(row.state, "on");
     }
 
     #[test]

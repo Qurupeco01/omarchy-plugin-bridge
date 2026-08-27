@@ -73,12 +73,37 @@ opb keys edit          # bind shell actions (binds live on the next `opb up`)
 | `opb pin update [--ref TAG] [--rename OLD=NEW]` | Preview → confirm → flip to a newer pin, reconciling `shell.json` |
 | `opb pin rollback` | Flip back one generation |
 | `opb plugin add URL [\--yes]` | Install a third-party plugin (upstream's flow) |
+| `opb plugin validate FOLDER` | Headless schema check of a plugin folder (for authors, no shell needed) |
 | `opb plugin enable/disable ID` | Toggle components (upstream IPC; conflicts between running apps are not analyzed — that's yours) |
 | `opb plugin list` | Read-only x-ray: manifests × storage rules, works headless |
 | `opb plugin edit` | Interactive editor: every plugin with its state; widgets get left/center/right/off, everything else on/off |
 | `opb keys list [--all]` | Show bind state per action (— unbound · ✓ as suggested · ✎ customized); `--all` includes disabled components |
 | `opb keys edit` | Interactive editor: enter to edit a combo (pre-filled), empty input to unbind; changes apply live |
 | `opb keys set ACTION COMBO` | Bind or rebind a shell action (refuses occupied combos); applies live when the shell is up |
+
+## Developing a plugin locally
+
+Plugins are folders under `~/.config/omarchy/plugins/<id>/` holding a
+`manifest.json` (`schemaVersion: 1`) plus QML entry points — the same contract
+upstream ships. To author and test one without publishing:
+
+```sh
+opb plugin validate ./my-plugin      # headless schema check (no shell needed)
+
+# put it where the shell discovers it — a git checkout at the install path so
+# hot-reload works AND it stays version-controlled (upstream's own install form):
+git clone ./my-plugin ~/.config/omarchy/plugins/<id>
+opb up                             # start the shell (if not running)
+opb plugin list                    # your plugin appears (origin: user)
+opb plugin enable <id>             # turn it on live
+```
+
+The shell watches `~/.config/omarchy/plugins/` and hot-reloads a plugin on
+save, so after `opb up` you edit, save, and see the result without restarting —
+"leave the editor open and watch your changes land" (upstream manual §Shell
+Plugins). Manifest changes reload too (the watch covers the whole folder).
+`opb plugin validate` is the headless authoring gate; `git clone` into the
+plugins dir keeps it a normal checkout you can `opb plugin update` and push.
 
 ## Updating
 
