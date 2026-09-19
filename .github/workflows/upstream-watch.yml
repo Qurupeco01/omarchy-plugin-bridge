@@ -11,5 +11,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: diff upstream main vs newest stable tag (sentinel paths)
+      - name: diff reviewed baseline vs newest stable tag (sentinel paths)
         run: ./.github/upstream-watch.sh

@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Contract watch (CONCEPT §6): diff upstream's newest stable tag against its
-# default branch on sentinel paths (RESEARCH §1). Failure = human review
-# before bumping the supported pin.
+# Contract watch (CONCEPT §6): flag sentinel-path changes between the last
+# reviewed upstream release and the newest stable release.
+#
+# Tags only. Upstream's development branch (quattro) is deliberately ignored:
+# it moves every day and is not what we pin to, so diffing against it flags
+# normal in-progress work as "drift" forever.
+#
+# Baseline: .github/contract-baseline holds the last reviewed release tag.
+# While the newest tag equals the baseline the job is green; it only fails
+# once a new release touches a sentinel path. Advance the baseline when the
+# supported pin is bumped.
 #
 # Sentinel paths:
 #   shell/services/PluginRegistry.qml   manifest schema
@@ -16,16 +24,20 @@
 # shipped commits as phantom drift.
 #
 # Exit 0 = clean; exit 1 = contract drift detected (report printed);
-# exit 2 = infrastructure error (no network, no tag, ...).
+# exit 2 = infrastructure error (no network, no tag, bad baseline, ...).
 #
 # OPB_UPSTREAM_URL overrides the remote — test hook for synthetic fixtures.
-# OPB_MAIN_BRANCH overrides the drifting branch (default: quattro).
+# OPB_BASELINE overrides the baseline file — test hook for synthetic fixtures.
 set -euo pipefail
 
 REMOTE="${OPB_UPSTREAM_URL:-https://github.com/basecamp/omarchy}"
-MAIN_BRANCH="${OPB_MAIN_BRANCH:-quattro}"
+BASELINE_FILE="${OPB_BASELINE:-$(dirname "$0")/contract-baseline}"
 
 die() { echo "upstream-watch: $*" >&2; exit 2; }
+
+[ -f "$BASELINE_FILE" ] || die "baseline file not found: $BASELINE_FILE"
+BASELINE="$(tr -d '[:space:]' < "$BASELINE_FILE")"
+[ -n "$BASELINE" ] || die "baseline file is empty: $BASELINE_FILE"
 
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -43,21 +55,27 @@ TAG="$(git ls-remote --tags "$REMOTE" \
   | sort -V | tail -n1)"
 [ -n "$TAG" ] || die "no semver release tags found at $REMOTE"
 
-git -C "$SCRATCH" fetch -q origin \
-  "+refs/tags/$TAG:refs/opb/tag" "+$MAIN_BRANCH:refs/opb/main"
+if [ "$TAG" = "$BASELINE" ]; then
+  echo "upstream-watch: clean — newest release $TAG is the reviewed baseline"
+  exit 0
+fi
 
-TAGREF=refs/opb/tag
-MAINREF=refs/opb/main
+git -C "$SCRATCH" fetch -q origin \
+  "+refs/tags/$BASELINE:refs/opb/base" "+refs/tags/$TAG:refs/opb/new" \
+  || die "failed to fetch tags $BASELINE and $TAG from $REMOTE"
+
+BASEREF=refs/opb/base
+NEWREF=refs/opb/new
 
 drift=0
-report="contract drift between $TAG and branch $MAIN_BRANCH ($REMOTE)"$'\n\n'
+report="contract drift between reviewed release $BASELINE and newest release $TAG ($REMOTE)"$'\n\n'
 
 flag_paths() { # $1 = heading, rest = pathspecs — tree diff, history-proof
   local heading="$1"; shift
   local stat
   # --stat-count keeps asset-heavy surfaces (themes/) from flooding the
   # report: first files listed, total still shown.
-  stat="$(git -C "$SCRATCH" diff --stat --stat-count=12 "$TAGREF" "$MAINREF" -- "$@")"
+  stat="$(git -C "$SCRATCH" diff --stat --stat-count=12 "$BASEREF" "$NEWREF" -- "$@")"
   if [ -n "$stat" ]; then
     drift=1
     report+="$heading"$'\n'"$stat"$'\n\n'
@@ -69,11 +87,11 @@ flag_paths() { # $1 = heading, rest = pathspecs — tree diff, history-proof
 flag_migrations() {
   local hits=""
   while IFS= read -r f; do
-    if git -C "$SCRATCH" show "$MAINREF:$f" 2>/dev/null | grep -q 'shell\.json'; then
+    if git -C "$SCRATCH" show "$NEWREF:$f" 2>/dev/null | grep -q 'shell\.json'; then
       hits+="  $f"$'\n'
     fi
   done < <(git -C "$SCRATCH" diff --name-only --diff-filter=d \
-    "$TAGREF" "$MAINREF" -- migrations/)
+    "$BASEREF" "$NEWREF" -- migrations/)
   if [ -n "$hits" ]; then
     drift=1
     report+="storage-rule migrations (migrations/* mentioning shell.json):"$'\n'"$hits"$'\n'
@@ -96,4 +114,4 @@ if [ "$drift" -eq 1 ]; then
   exit 1
 fi
 
-echo "upstream-watch: clean — no sentinel changes between $TAG and branch $MAIN_BRANCH"
+echo "upstream-watch: clean — no sentinel changes between $BASELINE and $TAG"
